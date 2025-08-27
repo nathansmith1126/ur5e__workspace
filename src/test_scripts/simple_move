@@ -1,0 +1,134 @@
+#-------------------------
+# Import Modules
+#-------------------------
+import rospy
+import sys
+import copy
+import moveit_commander
+from geometry_msgs.msg import PoseStamped, Pose, Vector3
+from moveit_msgs.msg import Constraints, TrajectoryConstraints, PositionConstraint, BoundingVolume
+from std_msgs.msg import Header
+from shape_msgs.msg import SolidPrimitive
+
+#-------------------------
+# Initialize ROS & MoveIt!
+#-------------------------
+# Initialize moveit_commander
+moveit_commander.roscpp_initialize(sys.argv)
+
+# Initialize ROS node
+rospy.init_node("ur5e_motion_node", anonymous=True)
+
+# Instantiate RobotCommander (interface to robot)
+robot = moveit_commander.RobotCommander()
+
+# Get the first MoveGroup available
+group_name = robot.get_group_names()[0]
+manipulator = moveit_commander.MoveGroupCommander(group_name)
+
+# PlanningSceneInterface for adding objects
+scene = moveit_commander.PlanningSceneInterface()
+
+# Clear any previous constraints
+manipulator.clear_path_constraints()
+
+# Add a table to the scene
+#-------------------------
+table_pose = PoseStamped()
+table_pose.header.frame_id = robot.get_planning_frame()
+
+# Position the table (convert inches to meters)
+table_pose.pose.position.x = -(36/2 - 3.5)/39.37
+table_pose.pose.position.y = 0.0
+table_pose.pose.position.z = (-2)/(2*39.37)
+
+# Table size in meters (width x length x height)
+table_size = (36/39.37, 60/39.37, 2/39.37)
+
+# Add the table to the scene
+scene.add_box(name="Table", pose=table_pose, size=table_size)
+
+#-------------------------
+# Define elbow workspace constraint
+#-------------------------
+# Workspace box size in meters
+ws_box = SolidPrimitive()
+ws_box.type = SolidPrimitive.BOX
+ws_box.dimensions = [60*2/39.37, 60*2/39.37, 70/39.37]  # width, length, height
+
+# Pose of the workspace box
+ws_pose = Pose()
+ws_pose.position.x = -(20/2 - 3.5)/39.37
+ws_pose.position.y = 0.0
+ws_pose.position.z = (70+2)/(2*39.37)
+
+# Bounding volume
+ws_region = BoundingVolume()
+ws_region.primitives = [ws_box]
+ws_region.primitive_poses = [ws_pose]
+
+# Position constraint message
+position_constraint = PositionConstraint()
+position_constraint.header.frame_id = robot.get_planning_frame()
+position_constraint.link_name = "forearm_link"  # elbow link
+position_constraint.target_point_offset = Vector3(0.0, 0.0, -(2)/(2*39.37))
+position_constraint.constraint_region = ws_region
+position_constraint.weight = 1.0
+
+# Full constraints
+ws_constraint = Constraints()
+ws_constraint.position_constraints = [position_constraint]
+
+# Trajectory constraints
+ws_traj_constraint = TrajectoryConstraints()
+ws_traj_constraint.constraints = [ws_constraint]
+
+# increase solving time 
+manipulator.set_planning_time(15.0)
+
+# Apply constraints to the manipulator
+manipulator.set_path_constraints(ws_constraint)
+
+#-------------------------
+# Move Robot to a target pose
+#-------------------------
+# Define a simple reachable pose for UR5e
+target_pose = Pose()
+target_pose.position.x = -0.6   # meters forward from robot base
+target_pose.position.y = 0.0   # centered
+target_pose.position.z = 0.6   # slightly above the table surface
+# target_pose.orientation.x = 0.0
+# target_pose.orientation.y = 0.0
+# target_pose.orientation.z = 0.0
+target_pose.orientation.w = -0.0  # neutral orientation
+
+# Set the target pose
+manipulator.set_pose_target(target_pose)
+
+# Plan to the pose
+plan_result = manipulator.plan()
+
+# Check if plan_result is a tuple
+if isinstance(plan_result, tuple) or isinstance(plan_result, list):
+    # The trajectory object is always at index 1
+    plan = plan_result[1]
+    # Some versions also have success flag at index 0
+    plan_success = plan_result[0] if len(plan_result) > 0 else True
+else:
+    plan = plan_result
+    plan_success = True
+
+# Execute only if plan succeeded and has points
+if plan_success and plan and len(plan.joint_trajectory.points) > 0:
+    manipulator.execute(plan, wait=True)
+    print("Motion complete!")
+else:
+    print("No valid plan found. Check constraints or target pose.")
+
+
+#-------------------------
+# Clean up
+#-------------------------
+manipulator.clear_pose_targets()
+manipulator.clear_path_constraints()
+moveit_commander.roscpp_shutdown()

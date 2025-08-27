@@ -1,0 +1,96 @@
+import sys
+import rospy
+import math
+from math import atan2, sqrt, pi, asin
+import time
+import cv2
+import numpy as np
+import pyrealsense2 as rs
+import geometry_msgs 
+from matplotlib import pyplot as plt
+from ultralytics import YOLO 
+from PIL import Image
+import torch
+
+#----------------------------------------------------------------
+# In the above code - there seems to be a mismatch between gyro and accel.
+# Obtain the respective values using method call
+#----------------------------------------------------------------
+
+
+# Instantiate the pipeline
+pipeline = rs.pipeline()
+
+# Instantiate config
+config = rs.config()
+
+# configure the stream
+config.enable_stream(stream_type=rs.stream.gyro)
+config.enable_stream(stream_type=rs.stream.accel)
+
+# Enable the stream
+profile = pipeline.start()
+# Use a while loop for continuous streaming
+
+while True:
+    
+    frameset = pipeline.wait_for_frames()
+
+    # Get the respective data
+    gyro = frameset.first_or_default(rs.stream.gyro).as_motion_frame().get_motion_data()
+    accel = frameset.first_or_default(rs.stream.accel).as_motion_frame().get_motion_data()
+
+    # Print them 
+    print(f"Accelerometer_data : ")
+    print(f"X : {accel.x : .2f}")
+    print(f"Y : {accel.y : .2f}")
+    print(f"Z : {accel.z : .2f}\n")
+    # print(f"Gyroscope_data : {gyro}\n")
+
+    # Assign variable to each axis in the accel data :  
+    ax, ay, az = accel.x, accel.y, accel.z
+
+    # Use arctan to get Euler angles - For derivation check handwritten notes - Deriving accelerometer equations
+    theta_z = atan2(ax, ay) * 180/pi
+    theta_x = asin(-az/sqrt(ax**2 + ay**2 + az**2)) * 180/pi
+
+
+    print(f"Angles are : ")
+    print(f"Theta_x : Roll = {theta_x: .4f}")
+    print(f"Theta_z : Yaw = {theta_z: .4f}\n\n")
+    # print(f"Theta_z = {theta_z: .4f}\n")
+
+    time.sleep(1)
+
+
+##----------------------------------------------------------
+## First Run the camera and get the Depth and Color Images
+##----------------------------------------------------------
+
+# # Initialize the pipeline class
+# pipeline = rs.pipeline()
+
+# # Initialize the config class
+# config = rs.config()
+# # config the depth and color stream
+# config.enable_stream(stream_type=rs.stream.color, width=1280, height=720, format=rs.format.rgb8, framerate=30)
+# config.enable_stream(stream_type=rs.stream.depth, width=1280, height=720, format=rs.format.z16, framerate=30)
+
+# # Start the stream
+# profile = pipeline.start(config)
+
+# # Pass up the first 100 frames to allow time for exposure 
+# for x in range(100):
+#     pipeline.wait_for_frames()
+
+# frameset = pipeline.wait_for_frames()
+# color_frame = frameset.get_color_frame()
+# depth_frame = frameset.get_depth_frame()
+
+# # Cleanup
+# pipeline.stop()
+# print("Frames Captured")
+
+# ## Get color and depth frames as any array
+# color = np.asanyarray(color_frame.get_data())
+# depth = np.asanyarray(depth_frame.get_data())
