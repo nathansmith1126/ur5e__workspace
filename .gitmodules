@@ -1,3 +1,6 @@
 [submodule "src/robotiq"]
 	path = src/robotiq
 	url = https://github.com/ros-industrial-attic/robotiq.git
+[submodule "src/robotiq_2f"]
+	path = src/robotiq_2f
+	url = https://github.com/nathansmith1126/robotiq_2f.git
