@@ -1,0 +1,185 @@
+import numpy as np 
+
+class RS2UR5e_interface:
+    '''
+    Class containing tools needed to interface Realsense camera and UR5e robot
+    NOTE:
+
+    - 4 frames of interest are the camera rame, robot frame, 0 frame and accelerometer frame
+    - The 0 frame is ian intermediary frame between robot frame and camera frame
+    - z basis vector in accelerometer frame points "backwards" and violates righthand rule
+        we will account for this accordingly
+    - T_AB denotes transformation matrix mapping frame A to frame B
+    '''
+    def __init__(self, OcOr_CF, rs_accel_grav_vector):
+        # vector mapping the origin of the camera frame (Oc)
+        # to the origin of the robot base frame (Or) expressed in the camera frame
+        self.OcOr_CF = OcOr_CF
+
+        # local gravitational accelaration vector from the 
+        # realsense camera expressed in the backwards "accelerometer" frame
+        self.rs_accel_grav_vector = rs_accel_grav_vector
+
+        # local gravitational acceleration vector from the
+        # realsense camera expressed in the camera frame after "readjusting" 
+        # for backwards z basis vector so the right hand rule is satisfied
+        rs_camera_grav_vector = rs_accel_grav_vector.copy()
+        rs_camera_grav_vector[2] *= -1
+        self.rs_camera_grav_vector = rs_camera_grav_vector
+
+        # vector mapping the origin of the robot base frame (Or)
+        # to the origin of the camera frame (Oc) expressed in the camera base frame
+        self.OrOc_CF = -1*OcOr_CF 
+
+        # vector mapping the origin of the robot base frame (Or)
+        # to the origin of the camera frame (Oc) expressed in the robot base frame
+        self.OrOc_RF = None
+
+        # euler angles associated with current camera orientation relative to frame 0
+        self.pitch = None
+        self.yaw = None
+
+        # transformation matrix between frame 0 and robot frame
+        self.T_0R = np.array(
+                            [
+                            [0, 0, 1],
+                            [1, 0, 0],
+                            [0, 1, 0]
+                            ]
+                            )
+                            
+        
+        # transformation matrix between camera frame and frame 0
+        self.T_C0 = None
+
+        # transformation matrix between robot frame and camera frame
+        self.T_RC = None
+
+        # transformation matrix between camera frame and robot frame
+        self.T_CR = None
+
+        # compute euler angles and rotation matrix
+        self.grav_vector2euler_angles()
+        self.euler_angles2rot_matrix()
+
+    def grav_vector2euler_angles(self):
+        '''
+        Function to convert the gravitational acceleration vector
+        expressed in the camera frame to euler angles (pitch, yaw) 
+        associated with current camera orientation relative to Reference frame 0.
+
+        We assume frame_0->roll->yaw->frame_camera
+
+        NOTE: roll cannot be determined from gravity vector alone and 
+        we assume based on the camera stand the camera cannot roll
+
+        Returns:
+        - self.pitch: rotation about x axis in radians
+        - self.yaw: rotation about y axis in radians
+        '''
+        g = self.rs_camera_grav_vector
+        g_x = g[0]
+        g_y = g[1]
+        g_z = g[2]
+        
+
+        # roll is from first rotation about x-axis
+        self.pitch = np.arctan2(np.sqrt(g_x**2 + g_z**2), -g_y).item()
+
+        # pitch is from second rotation about y-axis
+        self.yaw = np.arctan2(-g_x, g_z).item()
+
+    def euler_angles2rot_matrix(self):
+        '''
+        Function to convert euler angles (pitch, yaw) to rotation matrix
+        associated with current camera orientation relative to Reference frame 0.
+
+        We assume frame_0->roll->yaw->frame_camera
+
+        NOTE: roll cannot be determined from gravity vector alone and 
+        we assume based on the camera stand the camera cannot roll
+
+        Args:
+        - pitch: rotation about x axis in radians
+        - yaw: rotation about y axis in radians
+
+        Returns:
+        - T_0C: rotation matrix mapping frame 0 to camera frame
+        '''
+        R_pitch = np.array([
+                        [1, 0, 0],
+                        [0, np.cos(self.pitch), -np.sin(self.pitch)],
+                        [0, np.sin(self.pitch), np.cos(self.pitch)]
+                        ])
+        
+        R_yaw = np.array([
+                        [np.cos(self.yaw), 0, np.sin(self.yaw)],
+                        [0, 1, 0],
+                        [-np.sin(self.yaw), 0, np.cos(self.yaw)]
+                        ])
+        
+        self.T_C0 = R_pitch @ R_yaw
+
+        # transformation matrix between robot frame and camera frame
+        self.T_CR = self.T_0R @ self.T_C0
+
+    def transform_point_CF2RF(self, OcP_CF):
+        '''
+        Function to transform a cartesian point from camera frame to robot base frame
+
+        Args:
+        - OcP_CF: point cartesian coordinates expressed in camera frame
+
+        Returns:
+        - OrP_RF: point cartesian coordinates expressed in robot base frame
+        '''
+
+        # ensure a point is provided
+        if OcP_CF is None:
+            raise ValueError('No point provided to transform')
+
+        # ensure euler angles and rotation matrix are computed
+        if self.pitch is None or self.yaw is None:
+            self.grav_vector2euler_angles()
+        if not hasattr(self, 'T_C0'):
+            self.euler_angles2rot_matrix()
+
+        # vector mapping the origin of the robot base frame (Or)
+        # to the origin of the camera frame (Oc) expressed in the robot base frame
+        self.OrOc_RF = self.T_CR @ self.OrOc_CF
+
+        # OcP expressed in robot frame
+        OcP_RF = self.T_CR @ OcP_CF
+
+        # OrP expressed in robot frame
+        OrP_RF = self.OrOc_RF + OcP_RF
+
+        return OrP_RF
+    
+
+if __name__ == "__main__":
+    OcOr_CF = np.array([
+                        [0.2],
+                        [0.0], 
+                        [0.3]
+                        ])
+    rs_accel_grav_vector = np.array([
+                                    [-0.05], 
+                                    [-7.12], 
+                                    [-6.74]
+                                    ])
+    
+    OcP_CF = np.array([
+                    [0.1],
+                    [0.1],
+                    [0.1]
+                    ])
+    interface = RS2UR5e_interface(OcOr_CF, rs_accel_grav_vector)
+    OrP_RF = interface.transform_point_CF2RF(OcP_CF)
+    
+    
+
+        
+
+    
+
