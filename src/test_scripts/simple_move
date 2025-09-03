@@ -83,20 +83,20 @@ ws_constraint.position_constraints = [position_constraint]
 ws_traj_constraint = TrajectoryConstraints()
 ws_traj_constraint.constraints = [ws_constraint]
 
-# increase solving time 
-manipulator.set_planning_time(15.0)
-
 # Apply constraints to the manipulator
 manipulator.set_path_constraints(ws_constraint)
+
+# increase solving time 
+manipulator.set_planning_time(15.0)
 
 #-------------------------
 # Move Robot to a target pose
 #-------------------------
 # Define a simple reachable pose for UR5e
 target_pose = Pose()
-target_pose.position.x = -0.6   # meters forward from robot base
+target_pose.position.x = -0.4   # meters forward from robot base
 target_pose.position.y = 0.0   # centered
-target_pose.position.z = 0.6   # slightly above the table surface
+target_pose.position.z = 0.8   # slightly above the table surface
 # target_pose.orientation.x = 0.0
 # target_pose.orientation.y = 0.0
 # target_pose.orientation.z = 0.0
