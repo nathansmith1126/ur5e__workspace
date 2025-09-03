@@ -7,4 +7,6 @@ src/Universal_Robots_ROS_scaled_controllers/
 src/universal_robot/
 src/ur_client_library/
 src/ur_msgs/
+venv/
+.vscode/ 
 
