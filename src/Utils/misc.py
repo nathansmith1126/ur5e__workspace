@@ -16,7 +16,11 @@ from moveit_commander import MoveGroupCommander, RobotCommander
 def init_scene_with_table(table_center: Optional[Union[Sequence[float], np.ndarray]] = None,
                             table_dims: Optional[tuple] = None) -> tuple:
     '''
-    Function to initialize the planning scene with a tabl
+    Function to initialize the planning scene with a table
+    Returns:
+    robot: RobotCommander - represents robot arm state
+    manipulator: MoveGroupCommander - represents robot arm planner
+    scene: PlanningSceneInterface - object housing items in environment
     '''
   
     #-------------------------
@@ -56,7 +60,7 @@ def init_scene_with_table(table_center: Optional[Union[Sequence[float], np.ndarr
         table_pose.pose.position.z = table_center[2]
     
     if table_dims is None:
-        # Table size in meters (width x length x height)
+        # Table size in meters (width x length x thickness)
         table_size = (36/39.37, 60/39.37, 2/39.37)
     else:
         table_size = table_dims
