@@ -4,3 +4,9 @@
 [submodule "src/robotiq_2f"]
 	path = src/robotiq_2f
 	url = https://github.com/nathansmith1126/robotiq_2f.git
+[submodule "src/apriltag"]
+	path = src/apriltag
+	url = https://github.com/AprilRobotics/apriltag.git
+[submodule "src/apriltag_ros"]
+	path = src/apriltag_ros
+	url = https://github.com/AprilRobotics/apriltag_ros.git
