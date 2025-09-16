@@ -9,4 +9,3 @@ src/ur_client_library/
 src/ur_msgs/
 venv/
 .vscode/ 
-src/test_scripts/yolo11x-seg.pt
