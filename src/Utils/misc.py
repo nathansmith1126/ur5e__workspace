@@ -18,11 +18,15 @@ def add_table2scene( robot: RobotCommander,
                           table_center: Optional[Union[Sequence[float], np.ndarray]] = None,
                             table_dims: Optional[tuple] = None) -> PlanningScene:
     '''
+<<<<<<< HEAD
     Function to initialize the planning scene with a table
     Returns:
     robot: RobotCommander - represents robot arm state
     UR5e_move_group: MoveGroupCommander - represents robot arm planner
     scene: PlanningSceneInterface - object housing items in environment
+=======
+    Function to initialize the planning scene with a tabl
+>>>>>>> parent of 1b63faf... modifiedgrid world class
     '''
     #-------------------------
     # Add a table to the scene
@@ -46,7 +50,7 @@ def add_table2scene( robot: RobotCommander,
         table_pose.pose.position.z = table_center[2]
     
     if table_dims is None:
-        # Table size in meters (width x length x thickness)
+        # Table size in meters (width x length x height)
         table_size = (36/39.37, 60/39.37, 2/39.37)
     else:
         table_size = table_dims

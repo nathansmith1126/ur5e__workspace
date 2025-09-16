@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-import numpy as np
+
 import sys
 import rospy
 import moveit_commander
 import moveit_msgs.msg
 import geometry_msgs.msg
-from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest, GetPositionFK, GetPositionFKRequest
+from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest
 from moveit_msgs.msg import RobotState
 from sensor_msgs.msg import JointState
+<<<<<<< HEAD
 from geometry_msgs.msg import PoseStamped, Pose 
 from typing import Optional, Union, Sequence 
 from moveit_commander.robot import RobotCommander
 from moveit_commander.move_group import RobotTrajectory
+=======
+from geometry_msgs.msg import PoseStamped 
+from typing import Optional
+>>>>>>> parent of 1b63faf... modifiedgrid world class
 
 class grid_world:
     '''
     Class to define a grid world environment based on a discretization of the cartesian space
     '''  
+<<<<<<< HEAD
     def __init__(self, arm_radius: Optional[float] = 0.850, 
                  coordinate_system: Optional[str] = "UR5e_cent_rect", 
                  grid_size_array: Optional[Sequence[int]] = [0.25, 0.25, 0.25]):
@@ -436,3 +442,7 @@ class grid_world:
         # convert to list
         next_grid_state = next_grid_state_array.tolist()
         return next_grid_state
+=======
+    def __init__(self, grid_size: Optional[tuple] = (4,4,4)):
+        self.grid_size = grid_size
+>>>>>>> parent of 1b63faf... modifiedgrid world class
