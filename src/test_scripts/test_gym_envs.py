@@ -12,6 +12,7 @@ from typing import Optional, Sequence
 
 # simple test of environment
 env = UR5eGridEnv()
+# env.move2start_state_slow()
 obs, info = env.reset()
 print(f"Initial Observation: {obs}")
 
@@ -44,8 +45,13 @@ total_reward = 0.0
 #     [0, -1, 0],  # Move back in Y
 # ]
 
+# action_plan = [1, 1,
+#                5, 5,
+#                3, 3]
+
+
 action_plan = [1, 1,
-               5, 5,
+               5, 3,
                3, 3]
 
 for action in action_plan:

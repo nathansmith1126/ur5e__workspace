@@ -10,7 +10,18 @@ from typing import Optional, Sequence
 from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
 
-env = UR5eGridEnv()
+
+completion_reward = 10.0
+failed_trans_penalty = 0.1
+efficiency_penalty = 0.01
+closer2goal_reward = 0.01
+closest2goal_reward = 1.0
+
+env = UR5eGridEnv(completion_reward=completion_reward, 
+                  failed_trans_penalty=failed_trans_penalty, 
+                  efficiency_penalty=efficiency_penalty,
+                  closer2goal_reward=closer2goal_reward, 
+                  closest2goal_reward=closest2goal_reward)
 
 # check environment
 check_env(env)
@@ -18,8 +29,10 @@ check_env(env)
 # initialize 
 model = DQN("MlpPolicy", env, verbose=1)
 
+total_timesteps = 1_000
+
 # learn
-model.learn(total_timesteps=10_000, log_interval=4)
+model.learn(total_timesteps=total_timesteps, log_interval=4)
 model.save("UR5e_test_DQN")
 
 del model # remove to demonstrate saving and loading
