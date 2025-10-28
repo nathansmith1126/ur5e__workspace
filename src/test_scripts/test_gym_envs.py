@@ -6,12 +6,24 @@ import moveit_commander
 from geometry_msgs.msg import Pose
 from src.Utils.grid_world2cart_space import grid_world
 from src.Utils.misc import add_table2scene
-from src.Utils.gym_envs import UR5eGridEnv
+from src.Utils.gym_envs import UR5eGridEnv, UR5eGridEnvwDFA
+from src.Utils.AUTOMATA.auto_funcs import create_UR5e_xyz_DFA, DFAMonitor
 from typing import Optional, Sequence   
-        
 
-# simple test of environment
-env = UR5eGridEnv()
+# booleaan for which environment to test
+DFA_bool = True
+
+if DFA_bool:
+    # environment with DFA monitor
+    ur5e_DFA, potentials = create_UR5e_xyz_DFA()
+    dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials)
+    env = UR5eGridEnvwDFA(DFA_monitor=dfa_monitor)
+else:
+    env = UR5eGridEnv()
+
+
+
+# environment with DFA monitor
 # env.move2start_state_slow()
 obs, info = env.reset()
 print(f"Initial Observation: {obs}")
@@ -45,14 +57,16 @@ total_reward = 0.0
 #     [0, -1, 0],  # Move back in Y
 # ]
 
-# action_plan = [1, 1,
-#                5, 5,
-#                3, 3]
+action_plan = [3, 3,
+               1, 1,
+               5, 5]
 
 
-action_plan = [1, 1,
-               5, 3,
-               3, 3]
+# action_plan = [3, 3,
+#                1, 1,
+#                0, 0,
+#                1, 1,
+#                5, 5]
 
 for action in action_plan:
     print(f"Planned Action: {env.action_map[int(action)]}")
