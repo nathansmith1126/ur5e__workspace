@@ -21,9 +21,12 @@ class grid_world:
     '''
     Class to define a grid world environment based on a discretization of the cartesian space
     '''  
-    def __init__(self, arm_radius: Optional[float] = 0.850, 
+    def __init__(self, 
+                 start_state: Optional[Sequence[int]] = [1, 1, 3],
+                 goal_state: Optional[Sequence[int]] = [-1, -1, 1],
+                 arm_radius: Optional[float] = 0.850, 
                  coordinate_system: Optional[str] = "UR5e_cent_rect", 
-                 grid_size_array: Optional[Sequence[int]] = [0.25, 0.25, 0.25]):
+                 grid_size_array: Optional[Sequence[float]] = [0.25, 0.25, 0.25]):
        # Ur5e radius at maximum extension
        self.arm_radius = arm_radius
        
@@ -40,6 +43,12 @@ class grid_world:
        # set grid parameters
        self.grid_size_array = grid_size_array
 
+       # define start state based on grid size array
+       self.start_state = start_state # easy to get to
+        
+       # define goal state based on grid size array
+       self.goal_state = goal_state # hard to get to 
+        
        self.set_grid()
     
     def set_grid(self):
@@ -104,11 +113,6 @@ class grid_world:
             self.rectangular_thickness_list = [x_slice_thickness, y_slice_thickness, z_slice_thickness]
             self.min_thickness = np.min(self.rectangular_thickness_list)
             
-            # define start state based on grid size array
-            self.start_state = [1,1,3] # easy to get to
-            
-            # define goal state based on grid size array
-            self.goal_state = [-1,-1,1] # hard to get to
         else:
             raise ValueError('coordinate system must be polar or rectangular')
         

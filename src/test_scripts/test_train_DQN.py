@@ -10,18 +10,38 @@ from src.Utils.AUTOMATA.auto_funcs import create_UR5e_xyz_DFA, DFAMonitor
 from typing import Optional, Sequence   
 from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnNoModelImprovement
 
 DFA_bool = True 
 
 if DFA_bool:
+    
+    # dfa info for temporal task
     ur5e_DFA, potentials = create_UR5e_xyz_DFA()
     gamma = 0.93
     dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials, gamma=gamma)
-
+    
+    # starting and finish states
+    start_state = [2,2,5]
+    goal_state = [-3, -3, 3]
+    
+    # discretization of grid space
+    grid_size_array = [0.10, 0.10, 0.10]
+    
+    Grid_world = grid_world(grid_size_array=grid_size_array, 
+                            start_state=start_state, 
+                            goal_state=goal_state)
+    
+    # rewards and penalties
     completion_reward = 1.0
     failed_trans_penalty = 0.25
     efficiency_penalty = 0.10
-    env = UR5eGridEnvwDFA(DFA_monitor=dfa_monitor, 
+    
+    # max episode length
+    max_timesteps = 80
+    env = UR5eGridEnvwDFA(Grid_world=Grid_world,
+                          DFA_monitor=dfa_monitor,
+                          max_episode_steps=max_timesteps, 
                           completion_reward=completion_reward,
                           failed_trans_penalty=failed_trans_penalty, 
                           efficiency_penalty=efficiency_penalty,
@@ -44,7 +64,7 @@ else:
 check_env(env)
 
 # -------------------------------
-# Hyperparameters
+# Hyperparameters for Training
 # -------------------------------
 learning_rate = 1e-3
 buffer_size = 10_000
@@ -54,9 +74,10 @@ train_freq = 1
 gradient_steps = 1
 target_update_interval = 500
 
+# exploration/exploitation
 exploration_initial_eps = 1.0
 exploration_final_eps = 0.10
-exploration_fraction = 0.20
+exploration_fraction = 0.40
 
 net_arch = [64, 64]
 seed = 0
@@ -87,11 +108,32 @@ model = DQN(
 )
 
 # -------------------------------
+# Create a callback method to check for improvements
+# -------------------------------
+
+
+stop_cb = StopTrainingOnNoModelImprovement(
+    max_no_improvement_evals=5,   # patience: stop after 5 evals without improvement
+    min_evals=5,                  # wait at least 5 evals before checking
+    verbose=1,
+)
+
+eval_cb = EvalCallback(
+    env,
+    eval_freq=5_000,              # run eval every N training steps
+    best_model_save_path="./logs/best",
+    log_path="./logs",
+    deterministic=True,
+    render=False,
+    callback_after_eval=stop_cb,  # wires the patience logic
+)
+
+# -------------------------------
 # Training
 # -------------------------------
-# total_timesteps = 100_000
-# model.learn(total_timesteps=total_timesteps)
-# model.save("UR5e_test_DQN")
+total_timesteps = 100_000
+model.learn(total_timesteps=total_timesteps, callback=eval_cb)
+model.save("UR5e_test_DQN_0.1")
 
 del model # remove to demonstrate saving and loading
 

@@ -1,23 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-'''
-This script contains 2 functions for converting cloud format between Open3D and ROS:   
-* convertCloudFromOpen3dToRos  
-* convertCloudFromRosToOpen3d
-where the ROS format refers to "sensor_msgs/PointCloud2.msg" type.
-
-This script also contains a test case, which does such a thing:  
-(1) Read a open3d_cloud from .pcd file by Open3D.
-(2) Convert it to ros_cloud.
-(3) Publish ros_cloud to topic.
-(4) Subscribe the ros_cloud from the same topic.
-(5) Convert ros_cloud back to open3d_cloud.
-(6) Display it.  
-You can test this script's function by rosrun this script.
-
-'''
-
 import open3d
 import numpy as np
 from ctypes import * # convert float to uint32
@@ -107,12 +90,40 @@ def convertCloudFromRosToOpen3d(ros_cloud):
     # return
     return open3d_cloud
 
-def remove_far_points(pcd, threshold):
-    print("Removing far points...")
+def remove_points(pcd, threshold, axis=2, keep_below=True):
+    """
+    Filter a point cloud by a threshold along a specified axis.
+
+    Args:
+        pcd (open3d.geometry.PointCloud): input point cloud
+        threshold (float): threshold value along the chosen axis
+        axis (int): axis index (0=x, 1=y, 2=z). Default z-axis.
+        keep_below (bool): if True, keep points with axis value <= threshold
+                           (i.e. remove 'far' points with axis > threshold).
+                           If False, keep points with axis value >= threshold.
+
+    Returns:
+        open3d.geometry.PointCloud: filtered point cloud (may be empty)
+    """
+    if pcd is None:
+        return None
+
     points = np.asarray(pcd.points)
-    mask = np.linalg.norm(points, axis=1) < threshold
-    pcd_filtered = pcd.select_by_index(np.where(mask)[0])
-    return pcd_filtered
+
+    if points.size == 0:
+        return pcd  # nothing to filter
+
+    if axis < 0 or axis > 2:
+        raise ValueError("axis must be 0, 1 or 2")
+
+    if keep_below:
+        mask = points[:, axis] <= threshold
+    else:
+        mask = points[:, axis] >= threshold
+
+    indices = np.where(mask)[0]
+    print(f"Points before filtering: {len(points)}, after filtering: {len(indices)}")
+    return pcd.select_by_index(indices)
 
 
 def RANSAC(pcd, max_plane_idx = 5):
@@ -156,7 +167,7 @@ def RANSAC(pcd, max_plane_idx = 5):
 
 import matplotlib.pyplot as plt
 
-def DBSCAN(pcd):
+def DBSCAN(pcd, eps=0.02, visualize=False):
     """
     Apply DBSCAN clustering to the point cloud and draw.
 
@@ -167,15 +178,37 @@ def DBSCAN(pcd):
     
     print("Segmenting objects using DBSCAN...")
     
-    labels = np.array(pcd.cluster_dbscan(eps=0.02, min_points=10))
+    labels = np.array(pcd.cluster_dbscan(eps=eps, min_points=50))
     max_label = labels.max()
     if max_label == -1:
         return pcd.select_by_index([])  # No clusters found
+    
+    # Count points in each cluster
+    unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
+    
+    # Identify largest cluster
+    if len(unique_labels) > 0:
+        largest_cluster_label = unique_labels[np.argmax(counts)]
+    else:
+        print("No clusters found (only noise or empty point cloud).")
+        largest_cluster_label = None
+        
+    # Extract largest cluster
+    if largest_cluster_label is not None:
+        largest_cluster_indices = np.where(labels == largest_cluster_label)[0]
+        largest_cluster_pcd = pcd.select_by_index(largest_cluster_indices)
+    else:
+        largest_cluster_pcd = open3d.geometry.PointCloud() # Empty point cloud
 
-    colors = plt.get_cmap("tab20")(labels / (max_label if max_label > 0 else 1))
-    colors[labels < 0] = 0
-    pcd.colors = open3d.utility.Vector3dVector(colors[:, :3])
-    open3d.visualization.draw_geometries([pcd])
+    # Plot segmentations
+    if visualize:
+        print("Plotting segmented pointcloud...")
+        colors = plt.get_cmap("tab20")(labels / (max_label if max_label > 0 else 1))
+        colors[labels < 0] = 0
+        pcd.colors = open3d.utility.Vector3dVector(colors[:, :3])
+        open3d.visualization.draw_geometries([pcd])
+        
+    return largest_cluster_pcd
 
 
 # Server node implementation
@@ -186,9 +219,13 @@ class PointCloudSaveServer:
     def __init__(self):
         rospy.init_node('localize_server')
         self.topic_name = rospy.get_param('~pointcloud_topic', 'camera/depth/points')
-        self.output_filename = rospy.get_param('~output_filename', '/tmp/conversion_result.pcd')
+        self.output_topic_name = rospy.get_param('~output_topic_name', 'segmented/points')
         self.received_ros_cloud = None
-        self.subscriber = None
+        
+        # -- Set publisher
+        self.pub = rospy.Publisher(self.output_topic_name, PointCloud2, queue_size=1)
+        rospy.loginfo(f"Publishing to {self.output_topic_name}")
+        
         self.lock = threading.Lock()
         self.service = rospy.Service('~get_location', Trigger, self.handle_request)
         rospy.loginfo("LocalizeServer ready. Call service to get location.")
@@ -204,8 +241,11 @@ class PointCloudSaveServer:
     def handle_request(self, req):
         with self.lock:
             self.received_ros_cloud = None
+        
+        # -- Set subscriber
         self.subscriber = rospy.Subscriber(self.topic_name, PointCloud2, self.callback)
         rospy.loginfo(f"Subscribed to {self.topic_name}, waiting for pointcloud...")
+        
         timeout = rospy.get_param('~timeout', 5.0)
         start_time = rospy.Time.now().to_sec()
         rate = rospy.Rate(10)
@@ -217,25 +257,61 @@ class PointCloudSaveServer:
                 rospy.logwarn("Timeout waiting for pointcloud message.")
                 return TriggerResponse(success=False, message="Timeout waiting for pointcloud message.")
             rate.sleep()
+            
         with self.lock:
             ros_cloud = self.received_ros_cloud
+            
         try:
             o3d_cloud = convertCloudFromRosToOpen3d(ros_cloud)
             rospy.loginfo("Converted successfully.")
+            
             # Remove far points
-            processed_cloud = remove_far_points(o3d_cloud, threshold=1.0)
+            processed_cloud_far = remove_points(o3d_cloud, threshold=1.0)
             rospy.loginfo("Removed far points.")
+            
+            if processed_cloud_far is None:
+                processed_cloud_far = o3d_cloud
+                
+            # Remove near points
+            processed_cloud = remove_points(processed_cloud_far, threshold=0.2, keep_below=False)
+            rospy.loginfo("Removed near points.")
+            
             if processed_cloud is None:
-                processed_cloud = o3d_cloud
+                processed_cloud = processed_cloud_far
+            
+            # open3d.visualization.draw_geometries([processed_cloud])
             # Remove planes using RANSAC
-            processed_cloud = RANSAC(o3d_cloud)
+            processed_cloud_ransac = RANSAC(processed_cloud, 1)
             rospy.loginfo("Removed planes using RANSAC.")
-            if processed_cloud is None:
-                processed_cloud = o3d_cloud
+            if processed_cloud_ransac is None:
+                processed_cloud_ransac = processed_cloud
+
+            # open3d.visualization.draw_geometries([processed_cloud_ransac])
+
             # Segment objects and plot using DBSCAN
-            DBSCAN(processed_cloud)
-            rospy.loginfo("Plotted segmented pointcloud.")
-            return TriggerResponse(success=True, message="Plotted segmented pointcloud.")
+            object_pcd = DBSCAN(processed_cloud_ransac, 0.02)
+            # open3d.visualization.draw_geometries([object_pcd])
+            rospy.loginfo("Segmented object using DBSCAN.")
+        
+            # -- Convert open3d_cloud to ros_cloud, and publish. Until the subscribe receives it.
+            if object_pcd is not None:
+                rospy.loginfo("Converting cloud from Open3d to ROS PointCloud2 ...")
+                ros_cloud = convertCloudFromOpen3dToRos(object_pcd, frame_id=ros_cloud.header.frame_id)
+
+                # publish cloud
+                self.pub.publish(ros_cloud)
+                rospy.sleep(0.1)
+                rospy.loginfo("Conversion and publish success ...\n")
+                
+                # Get centroid
+                centroid = object_pcd.get_center()
+                
+                # return centroid in the service message as CSV
+                centroid_str = f"{centroid[0]:.6f},{centroid[1]:.6f},{centroid[2]:.6f}"
+                rospy.loginfo(f"Centroid: {centroid_str}")
+
+                return TriggerResponse(success=True, message=centroid_str)
+    
         except Exception as e:
             rospy.logerr(f"Error processing pointcloud: {e}")
             return TriggerResponse(success=False, message=str(e))

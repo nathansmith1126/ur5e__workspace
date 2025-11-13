@@ -17,7 +17,15 @@ if DFA_bool:
     # environment with DFA monitor
     ur5e_DFA, potentials = create_UR5e_xyz_DFA()
     dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials)
-    env = UR5eGridEnvwDFA(DFA_monitor=dfa_monitor)
+    
+    start_state = [2,2,5]
+    goal_state = [-3, -3, 3]
+    grid_size_array = [0.10, 0.10, 0.10]
+    
+    Grid_world = grid_world(grid_size_array=grid_size_array, 
+                            start_state=start_state, 
+                            goal_state=goal_state)
+    env = UR5eGridEnvwDFA(Grid_world=Grid_world, DFA_monitor=dfa_monitor)
 else:
     env = UR5eGridEnv()
 
@@ -28,7 +36,7 @@ else:
 obs, info = env.reset()
 print(f"Initial Observation: {obs}")
 
-
+# Default start and goal states
 # # define start state based on grid size array
 # self.start_state = [1,1,3] # easy to get to
 
@@ -57,16 +65,22 @@ total_reward = 0.0
 #     [0, -1, 0],  # Move back in Y
 # ]
 
-action_plan = [3, 3,
-               1, 1,
-               5, 5]
 
+# action plans for grid size of 0.25m
+# action_plan = [3, 3,
+#                1, 1,
+#                5, 5]
 
 # action_plan = [3, 3,
 #                1, 1,
 #                0, 0,
 #                1, 1,
 #                5, 5]
+
+# action plan for grid size of 0.1m 
+action_plan = [1, 1, 1, 1, 1,
+               3, 3, 3, 3, 3,
+               5, 5]
 
 for action in action_plan:
     print(f"Planned Action: {env.action_map[int(action)]}")

@@ -9,6 +9,7 @@ from src.Utils.grid_world2cart_space import grid_world
 from src.Utils.misc import add_table2scene
 from src.Utils.AUTOMATA.auto_funcs import DFAMonitor
 from typing import Optional, Sequence, List, Tuple, Dict 
+from collections import defaultdict
 
 class UR5eGridEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -344,6 +345,7 @@ class UR5eGridEnvwDFA(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, 
+                 Grid_world: grid_world,
                  DFA_monitor: DFAMonitor, 
                  max_episode_steps: Optional[int] = 50, 
                  failed_trans_penalty: Optional[float] = 0.1, 
@@ -361,7 +363,7 @@ class UR5eGridEnvwDFA(gym.Env):
         rospy.init_node("ur5e_grid_env", anonymous=True)
 
         # Initialize custom grid world for UR5e
-        self.grid_world = grid_world()
+        self.grid_world = Grid_world
         
         # Initialize MoveIt interfaces
         self.robot = moveit_commander.RobotCommander() # interface to the robot
@@ -810,6 +812,114 @@ class UR5eGridEnvwDFA(gym.Env):
         self.UR5e_move_group.clear_path_constraints()
         moveit_commander.roscpp_shutdown()        
         
+class UR5e_TQ_agent:
+    '''
+    UR5e agent for tabular Q-learning. 
+    
+    Args:
+        UR5e_env (gym.Env): UR5e gym grid world environment
+        learning_rate (float): learning rate for Q-learning updates
+        initial_epsilon (float): initial epsilon for epsilon-greedy exploration
+        final_epsilon (float): final epsilon for epsilon-greedy exploration
+        exploration_fraction (float): fraction of training steps over which to decrease epsilon
+        discount_factor (float): discount factor for future rewards
+    '''
+    def __init__(self, 
+                 UR5e_env: gym.Env, 
+                 learning_rate: float = 1e-3, 
+                 initial_epsilon: float = 1.0,
+                 final_epsilon: float = 0.1,
+                 exploration_fraction: float = 0.4,
+                 discount_factor: float = 0.93, 
+                 angle_size: float = 0.52):
+        
+        # initialize UR5e environment
+        self.env = UR5e_env
+
+        # learning rate for Q-learning updates
+        self.learning_rate = learning_rate
+
+        # epsilon-greedy exploration parameters
+        self.initial_epsilon = initial_epsilon
+        self.final_epsilon = final_epsilon
+        self.exploration_fraction = exploration_fraction
+
+        # discount factor for future rewards
+        self.discount_factor = discount_factor
+        
+        # initialize epsilon
+        self.epsilon = initial_epsilon
+        
+        
+        
+    def init_q_table(self, angle_size):
+        '''
+        Initialize Q-table for tabular Q-learning
+        
+        Args:
+            angle_size (int): thickness of angle discretizations per joint
+        '''
+        # used to determine observation space limits, 7 is overestimation of 2pi to account for joint angles
+        max_angle_int = np.ceil(2*np.pi / angle_size)
+
+        max_obs_index = max( (np.ceil( self.env.grid_world.arm_radius / self.env.grid_world.min_thickness ), max_angle_int ) )  
+        
+        # number of joint angles
+        n_joints = len(self.UR5e_move_group.get_active_joints())
+
+        # diemension of grid space
+        grid_dim = 3
+        
+        # number of DFA states
+        DFA_states = self.env.DFA_monitor.num_states
+        
+        # observation space dimension is sum of grid dim, eef dim, DFA state size and n_joints
+        obs_space_dimension = grid_dim + DFA_states + n_joints
+        
+        # observation space dependent on grid world
+        self.observation_space = spaces.Box(
+            low=-max_obs_index, high=max_obs_index, shape=(obs_space_dimension,), dtype=np.int32
+        )
+
+
+    def discrete_obs(self, obs) -> Tuple:
+        '''
+        Discretize continuous observation into discrete state
+        
+        Args:
+            obs (np.array): observation from UR5e gym env that is mix of discrete and continuous values
+        
+        Returns:
+            discrete_state (tuple): discretized observation as tuple for Q-table indexing
+        '''
+        # to do: implement discretization logic
+        pass
+        # discrete_state = tuple((obs * some_scaling_factor).astype(int))
+        # return discrete_state
+    
+    def get_action(self, obs) -> int:
+        '''
+        Get action using epsilon-greedy policy
+        
+        Args:
+            obs (np.array): current observation
+        
+        Returns:
+            action (int): action to take
+        '''
+        if np.random.rand() < self.epsilon:
+            # explore
+            action = self.env.action_space.sample()
+        else:
+            # exploit
+            # to do: implement Q-table lookup
+            pass
+            # action = np.argmax(self.q_table[obs])
+        
+        return action
+        
+        
+
 if __name__ == "__main__":
     # simple test of environment
     env = UR5eGridEnv()
