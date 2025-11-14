@@ -8,7 +8,7 @@ from geometry_msgs.msg import Pose
 from src.Utils.grid_world2cart_space import grid_world
 from src.Utils.misc import add_table2scene
 from src.Utils.AUTOMATA.auto_funcs import DFAMonitor
-from typing import Optional, Sequence, List, Tuple, Dict 
+from typing import Optional, Sequence, List, Tuple, Dict, Union
 from collections import defaultdict
 
 class UR5eGridEnv(gym.Env):
@@ -345,7 +345,9 @@ class UR5eGridEnvwDFA(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, 
-                 Grid_world: grid_world,
+                 start_states: Union[List[List[int]], List[int]], 
+                 goal_state: List[int], 
+                 grid_size_array: List[float],
                  DFA_monitor: DFAMonitor, 
                  max_episode_steps: Optional[int] = 50, 
                  failed_trans_penalty: Optional[float] = 0.1, 
@@ -353,7 +355,9 @@ class UR5eGridEnvwDFA(gym.Env):
                  closest2goal_reward: Optional[float] = 0.1, 
                  completion_reward: Optional[float] = 1.0, 
                  auto_reward_scaler: Optional[float] = 4.0,
-                 efficiency_penalty: Optional[float] = 0.01):
+                 efficiency_penalty: Optional[float] = 0.01, 
+                 pos_tolerance: Optional[float] = 0.05,
+                 plan_time: Optional[float] = 3.0,):
         super().__init__()
         
         # Initialize moveit planning node
@@ -362,8 +366,13 @@ class UR5eGridEnvwDFA(gym.Env):
         # initialize this script as a ROS node
         rospy.init_node("ur5e_grid_env", anonymous=True)
 
-        # Initialize custom grid world for UR5e
-        self.grid_world = Grid_world
+        # Initialize custom grid world parameters
+        self.start_states = start_states
+        self.goal_state = goal_state
+        self.grid_size_array = grid_size_array
+        
+        # Generate grid world
+        self.generate_grid_world()
         
         # Initialize MoveIt interfaces
         self.robot = moveit_commander.RobotCommander() # interface to the robot
@@ -377,6 +386,12 @@ class UR5eGridEnvwDFA(gym.Env):
         # add work table to the scene
         add_table2scene(self.robot, self.scene)
         
+        # add position tolerances for moveit
+        self.UR5e_move_group.set_goal_position_tolerance(pos_tolerance) # 5mm
+        
+        # add time allowance for planning
+        self.UR5e_move_group.set_planning_time(plan_time) # 5 seconds
+
         # initialize info dictionary that is returned at each bym env step
         # It will house planning time and error codes from MoveIt
         
@@ -439,11 +454,11 @@ class UR5eGridEnvwDFA(gym.Env):
         
         # initialize rewards and penalties
         self.failed_trans_penalty = failed_trans_penalty # penalty for failed UR5e transition
-        self.closer2goal_reward = closer2goal_reward # small reward for getting closer to goal
-        self.completion_reward = completion_reward # reward for reaching goal
-        self.efficiency_penalty = efficiency_penalty # small penalty for each step taken to promote efficiency
-        self.closest2goal_reward = closest2goal_reward
-        self.auto_reward_scaler = auto_reward_scaler # scale DFA potential difference reward
+        self.closer2goal_reward   = closer2goal_reward # small reward for getting closer to goal
+        self.completion_reward    = completion_reward # reward for reaching goal
+        self.efficiency_penalty   = efficiency_penalty # small penalty for each step taken to promote efficiency
+        self.closest2goal_reward  = closest2goal_reward
+        self.auto_reward_scaler   = auto_reward_scaler # scale DFA potential difference reward
         
         # initialize previous distance and grid state
         self.prev_distance2goal = None
@@ -451,6 +466,23 @@ class UR5eGridEnvwDFA(gym.Env):
         self.min_distance = None
         self.distance2goal = None
         
+    def generate_grid_world(self):
+        '''
+        Generate grid world based on current parameters. 
+        If start_state contains multiple sttates (list of lists), randomly select one.
+        If start_state is a single state (list), use that directly.
+        '''
+        if isinstance(self.start_states[0], list):
+            # multiple start states, randomly select one
+            rand_index = np.random.randint(0, len(self.start_states))
+            selected_start_state = self.start_states[rand_index]
+        else: 
+            # single start state
+            selected_start_state = self.start_states    
+        
+        self.grid_world = grid_world(start_state=selected_start_state, 
+                                     goal_state=self.goal_state, 
+                                     grid_size_array=self.grid_size_array)
     def grid_state2obs(self, state):
         return np.array(state, dtype=np.float32)
     
@@ -619,6 +651,9 @@ class UR5eGridEnvwDFA(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
+        
+        # generate grid world
+        self.generate_grid_world()
         
         # move to start state
         self.move2start_state()
@@ -831,7 +866,8 @@ class UR5e_TQ_agent:
                  final_epsilon: float = 0.1,
                  exploration_fraction: float = 0.4,
                  discount_factor: float = 0.93, 
-                 angle_size: float = 0.52):
+                 angle_size: float = 0.52,
+                 max_steps: int = 100_000):
         
         # initialize UR5e environment
         self.env = UR5e_env
@@ -850,9 +886,22 @@ class UR5e_TQ_agent:
         # initialize epsilon
         self.epsilon = initial_epsilon
         
+        # joint angle discretization size
+        self.angle_size = angle_size
         
+        # maximum number of training steps
+        self.max_steps = max_steps
         
-    def init_q_table(self, angle_size):
+        # initialize sampling counter
+        self.step_counter = 0
+        
+        # initialize training error
+        self.training_error = []
+        
+        # initialize Q-table
+        self.init_q_table()
+        
+    def init_q_table(self):
         '''
         Initialize Q-table for tabular Q-learning
         
@@ -860,12 +909,12 @@ class UR5e_TQ_agent:
             angle_size (int): thickness of angle discretizations per joint
         '''
         # used to determine observation space limits, 7 is overestimation of 2pi to account for joint angles
-        max_angle_int = np.ceil(2*np.pi / angle_size)
+        max_angle_int = np.ceil(2*np.pi / self.angle_size)
 
         max_obs_index = max( (np.ceil( self.env.grid_world.arm_radius / self.env.grid_world.min_thickness ), max_angle_int ) )  
         
         # number of joint angles
-        n_joints = len(self.UR5e_move_group.get_active_joints())
+        n_joints = len(self.env.UR5e_move_group.get_active_joints())
 
         # diemension of grid space
         grid_dim = 3
@@ -881,8 +930,9 @@ class UR5e_TQ_agent:
             low=-max_obs_index, high=max_obs_index, shape=(obs_space_dimension,), dtype=np.int32
         )
 
+        self.q_values = defaultdict(lambda: np.zeros(self.env.action_space.n))
 
-    def discrete_obs(self, obs) -> Tuple:
+    def discrete_obs(self, obs) -> np.array:
         '''
         Discretize continuous observation into discrete state
         
@@ -890,13 +940,38 @@ class UR5e_TQ_agent:
             obs (np.array): observation from UR5e gym env that is mix of discrete and continuous values
         
         Returns:
-            discrete_state (tuple): discretized observation as tuple for Q-table indexing
+            discrete_obs (tuple): discretized observation as tuple for Q-table indexing
         '''
-        # to do: implement discretization logic
-        pass
-        # discrete_state = tuple((obs * some_scaling_factor).astype(int))
-        # return discrete_state
-    
+        
+        # split observation into grid state, joint angles, DFA state
+        grid_state_array  = obs[0:3]
+        joint_angle_array = obs[6:12]
+        dfa_state_array   = obs[12:]
+        
+        # discretize joint angles
+        joint_angle_disc_array = self.true_joint_angles2discrete_joint_angles(joint_angle_array)
+
+        # concatenate all discrete components into single observation
+        discrete_obs = np.concatenate((grid_state_array, joint_angle_disc_array, dfa_state_array))
+        
+        return discrete_obs
+
+    def true_joint_angles2discrete_joint_angles(self, joint_angle_array) -> np.array:
+        '''
+        Convert true joint angles to discrete joint angles for Q-table indexing
+        
+        Args:
+            joint_angle_array (np.array): array of true joint angles
+
+        Returns:
+            discrete_joint_angles (np.array): array of discrete joint angles
+        '''
+        # discretize joint angles
+        # theta_discrete = ceil( (theta - angle_size/2) / angle_size )
+        discrete_joint_angles = np.ceil((joint_angle_array - self.angle_size / 2) / self.angle_size).astype(np.int32)
+        
+        return discrete_joint_angles
+
     def get_action(self, obs) -> int:
         '''
         Get action using epsilon-greedy policy
@@ -907,18 +982,80 @@ class UR5e_TQ_agent:
         Returns:
             action (int): action to take
         '''
+        
+        # map observations to discrete states
+        obs_discrete = self.discrete_obs(obs)
+
+        # map arrays to tuples for table indexing
+        obs_key = tuple(np.asarray(obs_discrete, dtype=int))
+
         if np.random.rand() < self.epsilon:
             # explore
             action = self.env.action_space.sample()
         else:
             # exploit
-            # to do: implement Q-table lookup
-            pass
-            # action = np.argmax(self.q_table[obs])
+            action = np.argmax(self.q_values[obs_key])
         
         return action
+    
+    def update_q_table(self, 
+                       obs: np.array, 
+                       action: int, 
+                       reward: float, 
+                       done: bool, 
+                       next_obs: np.array):
+        '''
+        Update Q-table using with temporal difference learning
+        Also updatestraining error and num steps
+        Args:
+            obs (np.array): current observation
+            action (int): action taken
+            reward (float): reward received
+            done (bool): whether episode ended
+            next_obs (np.array): next observation
+        '''
         
+        # map observations to discrete states
+        obs_discrete      = self.discrete_obs(obs)
+        next_obs_discrete = self.discrete_obs(next_obs)
         
+        # map arrays to tuples for table indexing
+        obs_key = tuple(np.asarray(obs_discrete, dtype=int))
+        next_obs_key = tuple(np.asarray(next_obs_discrete, dtype=int))
+
+        # get current Q-value
+        current_q_value = self.q_values[obs_key][action]
+
+        # get maximum Q-value for next observation as long as not terminated
+        if done:
+            # episode finished so no next Q-value
+            max_next_q_value = 0  
+        else:
+            # get max Q-value for next observation
+            max_next_q_value = np.max(self.q_values[next_obs_key])
+        
+        # compute target Q-value
+        target_q_value = reward + self.discount_factor * max_next_q_value
+        
+        # compute temporal difference
+        temporal_difference = target_q_value - current_q_value
+        
+        # update Q-value
+        new_q_value = current_q_value + self.learning_rate * temporal_difference
+        self.q_values[obs_key][action] = new_q_value
+
+        # record training error
+        self.training_error.append(temporal_difference)
+        
+        # update step counter
+        self.step_counter += 1
+
+    def decay_epsilon(self):
+        '''
+        Decay the exploration rate (epsilon) over time.
+        '''
+        delta = self.step_counter / (self.exploration_fraction * self.max_steps)
+        self.epsilon = self.initial_epsilon - delta * (self.initial_epsilon - self.final_epsilon)
 
 if __name__ == "__main__":
     # simple test of environment

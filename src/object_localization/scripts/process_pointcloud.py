@@ -214,108 +214,144 @@ def DBSCAN(pcd, eps=0.02, visualize=False):
 # Server node implementation
 import threading
 from std_srvs.srv import Trigger, TriggerResponse
+from object_localization.srv import Centroid, CentroidResponse
+from geometry_msgs.msg import PointStamped
+import tf
 
-class PointCloudSaveServer:
+class GetCentroidServer:
     def __init__(self):
         rospy.init_node('localize_server')
+
+        # subscriber topic name
         self.topic_name = rospy.get_param('~pointcloud_topic', 'camera/depth/points')
-        self.output_topic_name = rospy.get_param('~output_topic_name', 'segmented/points')
         self.received_ros_cloud = None
         
-        # -- Set publisher
-        self.pub = rospy.Publisher(self.output_topic_name, PointCloud2, queue_size=1)
-        rospy.loginfo(f"Publishing to {self.output_topic_name}")
-        
+        # frame transformation
+        self.frame_in = rospy.get_param('~pcl_frame', 'camera_color_optical_frame')
+        self.frame_out = rospy.get_param('~robot_frame', 'base_link')
+        self.tf_listener = tf.TransformListener()
+
         self.lock = threading.Lock()
-        self.service = rospy.Service('~get_location', Trigger, self.handle_request)
-        rospy.loginfo("LocalizeServer ready. Call service to get location.")
+        # Create a persistent subscriber so we continuously buffer the latest pointcloud
+        self.subscriber = rospy.Subscriber(self.topic_name, PointCloud2, self.callback)
+        self.service = rospy.Service('~get_location', Centroid, self.handle_request)
+        rospy.loginfo("LocalizeServer ready. Subscribed to %s and service available at ~get_location.", self.topic_name)
 
     def callback(self, ros_cloud):
+        # Always update the buffered latest pointcloud. Do not unregister the subscriber;
+        # keep receiving messages so subsequent service calls can use the latest data.
         with self.lock:
-            if self.received_ros_cloud is None:
-                self.received_ros_cloud = ros_cloud
-                rospy.loginfo("Received PointCloud2 message. Unsubscribing.")
-                if self.subscriber:
-                    self.subscriber.unregister()
+            self.received_ros_cloud = ros_cloud
+            # Optionally store a timestamp if needed in the future
+            # self.last_cloud_time = rospy.Time.now()
+        rospy.logdebug("Buffered latest PointCloud2 message.")
 
     def handle_request(self, req):
+        # Clear any previous buffered cloud so we wait for a fresh message, but keep the
+        # persistent subscriber active (it was created in __init__).
         with self.lock:
             self.received_ros_cloud = None
-        
-        # -- Set subscriber
-        self.subscriber = rospy.Subscriber(self.topic_name, PointCloud2, self.callback)
-        rospy.loginfo(f"Subscribed to {self.topic_name}, waiting for pointcloud...")
-        
+        rospy.loginfo("Waiting for next PointCloud2 message (subscriber is persistent)...")
+
         timeout = rospy.get_param('~timeout', 5.0)
         start_time = rospy.Time.now().to_sec()
         rate = rospy.Rate(10)
+
+        # -- Server response
+        point = PointStamped()
+        point.header.frame_id = self.frame_out
+        response = CentroidResponse()
+
+        # Wait for a new buffered cloud
         while not rospy.is_shutdown():
             with self.lock:
                 if self.received_ros_cloud is not None:
+                    ros_cloud = self.received_ros_cloud
                     break
             if rospy.Time.now().to_sec() - start_time > timeout:
                 rospy.logwarn("Timeout waiting for pointcloud message.")
-                return TriggerResponse(success=False, message="Timeout waiting for pointcloud message.")
+                point.point.x = point.point.y = point.point.z = 0.0
+                point.header.stamp = rospy.Time(0)
+                response.centroid = point
+                return response
+
             rate.sleep()
-            
-        with self.lock:
-            ros_cloud = self.received_ros_cloud
-            
+
         try:
             o3d_cloud = convertCloudFromRosToOpen3d(ros_cloud)
             rospy.loginfo("Converted successfully.")
-            
+
             # Remove far points
             processed_cloud_far = remove_points(o3d_cloud, threshold=1.0)
             rospy.loginfo("Removed far points.")
-            
+
             if processed_cloud_far is None:
                 processed_cloud_far = o3d_cloud
-                
+
             # Remove near points
             processed_cloud = remove_points(processed_cloud_far, threshold=0.2, keep_below=False)
             rospy.loginfo("Removed near points.")
-            
+
             if processed_cloud is None:
                 processed_cloud = processed_cloud_far
-            
-            # open3d.visualization.draw_geometries([processed_cloud])
+
             # Remove planes using RANSAC
             processed_cloud_ransac = RANSAC(processed_cloud, 1)
             rospy.loginfo("Removed planes using RANSAC.")
             if processed_cloud_ransac is None:
                 processed_cloud_ransac = processed_cloud
 
-            # open3d.visualization.draw_geometries([processed_cloud_ransac])
-
             # Segment objects and plot using DBSCAN
             object_pcd = DBSCAN(processed_cloud_ransac, 0.02)
-            # open3d.visualization.draw_geometries([object_pcd])
             rospy.loginfo("Segmented object using DBSCAN.")
-        
-            # -- Convert open3d_cloud to ros_cloud, and publish. Until the subscribe receives it.
-            if object_pcd is not None:
-                rospy.loginfo("Converting cloud from Open3d to ROS PointCloud2 ...")
-                ros_cloud = convertCloudFromOpen3dToRos(object_pcd, frame_id=ros_cloud.header.frame_id)
 
-                # publish cloud
-                self.pub.publish(ros_cloud)
-                rospy.sleep(0.1)
-                rospy.loginfo("Conversion and publish success ...\n")
-                
+            # -- Return centroid to the client
+            if object_pcd is not None and len(np.asarray(object_pcd.points)) > 0:
                 # Get centroid
                 centroid = object_pcd.get_center()
-                
-                # return centroid in the service message as CSV
-                centroid_str = f"{centroid[0]:.6f},{centroid[1]:.6f},{centroid[2]:.6f}"
-                rospy.loginfo(f"Centroid: {centroid_str}")
 
-                return TriggerResponse(success=True, message=centroid_str)
-    
+                # Centroid in camera frame
+                point_camera_frame = PointStamped()
+                point_camera_frame.header.frame_id = self.frame_in
+                point_camera_frame.point.x = float(centroid[0])
+                point_camera_frame.point.y = float(centroid[1])
+                point_camera_frame.point.z = float(centroid[2])
+                
+                # Wait for the transform to become available
+                # This is good practice to avoid exceptions if the transform isn't available immediately
+                try:
+                    self.tf_listener.waitForTransform(self.frame_out, self.frame_in, rospy.Time(0), rospy.Duration(4.0))
+                except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
+                    rospy.logerr("Transform unavailable: %s", e)
+                    return
+                
+                # Transform the point
+                try:
+                    point_robot_frame = self.tf_listener.transformPoint(self.frame_out, point_camera_frame)
+                    point_robot_frame.header.stamp = rospy.Time(0)
+                except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
+                    rospy.logerr("Transformation failed: %s", e)
+                
+                # return reponse
+                response.centroid = point_robot_frame
+
+                rospy.loginfo(f"Centroid returned (x: {point_robot_frame.point.x}, y: {point_robot_frame.point.y}, z: {point_robot_frame.point.z})")
+
+                return response
+
+            # If no object found, return zeros
+            point.point.x = point.point.y = point.point.z = 0.0
+            point.header.stamp = rospy.Time(0)
+            response.centroid = point
+            return response
+
         except Exception as e:
             rospy.logerr(f"Error processing pointcloud: {e}")
-            return TriggerResponse(success=False, message=str(e))
+            point.point.x = point.point.y = point.point.z = 0.0
+            point.header.stamp = rospy.Time(0)
+            response.centroid = point
+            return response
 
 if __name__ == "__main__":
-    server = PointCloudSaveServer()
+    server = GetCentroidServer()
     rospy.spin()

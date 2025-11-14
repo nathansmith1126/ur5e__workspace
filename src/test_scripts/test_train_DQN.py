@@ -21,17 +21,16 @@ if DFA_bool:
     gamma = 0.93
     dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials, gamma=gamma)
     
-    # starting and finish states
-    start_state = [2,2,5]
-    goal_state = [-3, -3, 3]
-    
-    # discretization of grid space
-    grid_size_array = [0.10, 0.10, 0.10]
-    
-    Grid_world = grid_world(grid_size_array=grid_size_array, 
-                            start_state=start_state, 
-                            goal_state=goal_state)
-    
+    # hard settings
+    # start_state = [2,2,5]
+    # goal_state = [-3, -3, 3]
+    # grid_size_array = [0.10, 0.10, 0.10]
+
+    # easy settings
+    start_state = [2,2,3]
+    goal_state = [1, 1, 2]
+    grid_size_array = [0.25, 0.25, 0.25 ]
+        
     # rewards and penalties
     completion_reward = 1.0
     failed_trans_penalty = 0.25
@@ -39,7 +38,9 @@ if DFA_bool:
     
     # max episode length
     max_timesteps = 80
-    env = UR5eGridEnvwDFA(Grid_world=Grid_world,
+    env = UR5eGridEnvwDFA(start_states=start_state, 
+                          goal_states=goal_state, 
+                          grid_size_array=grid_size_array, 
                           DFA_monitor=dfa_monitor,
                           max_episode_steps=max_timesteps, 
                           completion_reward=completion_reward,
