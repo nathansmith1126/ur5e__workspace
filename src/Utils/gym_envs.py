@@ -349,6 +349,7 @@ class UR5eGridEnvwDFA(gym.Env):
                  goal_state: List[int], 
                  grid_size_array: List[float],
                  DFA_monitor: DFAMonitor, 
+                 DFA_alphabet_dict: Dict[int, str] = None,
                  max_episode_steps: Optional[int] = 50, 
                  failed_trans_penalty: Optional[float] = 0.1, 
                  closer2goal_reward: Optional[float] = 0.01,
@@ -373,6 +374,7 @@ class UR5eGridEnvwDFA(gym.Env):
         
         # Generate grid world
         self.generate_grid_world()
+    
         
         # Initialize MoveIt interfaces
         self.robot = moveit_commander.RobotCommander() # interface to the robot
@@ -400,30 +402,11 @@ class UR5eGridEnvwDFA(gym.Env):
         # initialize DFA monitor for temporal rewards 
         self.DFA_monitor = DFA_monitor 
         
-        # labeling dictionary to map grid labels to DFA letters
-        '''
-        NOTE:
-        Technically, the automaton alphabet is equal to the label of indicators, but 
-        we use the current grid state label and prior grid state label to reduce 
-        the automaton alphabet from 8 letters to 4 letters for easier implementation. 
-        '''
-        self.labeling_dict = {0:"delta_x", 1:"delta_y", 2:"delta_z"}
-        
-        # Action space: 6 discrete moves
-        self.action_space = spaces.Discrete(6)
-        
-        # map discrete action → xyz translation
-        self.action_map = {
-                            0: [1, 0, 0],   # +x
-                            1: [-1, 0, 0],  # -x
-                            2: [0, 1, 0],   # +y
-                            3: [0, -1, 0],  # -y
-                            4: [0, 0, 1],   # +z
-                            5: [0, 0, -1],  # -z
-                            }
+        # optional alphabet dictionary to map grid labels to DFA letters (IF NECESSARY)
+        self.DFA_alphabet_dict = DFA_alphabet_dict
       
         # used to determine observation space limits, 7 is overestimation of 2pi to account for joint angles 
-        max_grid_index = max( (np.ceil( self.grid_world.arm_radius / self.grid_world.min_thickness ), 7.0 ) )
+        max_grid_index = max( (np.ceil( 2*self.grid_world.arm_radius / self.grid_world.min_thickness ), 7.0 ) )
         
         # number of joint angles
         n_joints = len(self.UR5e_move_group.get_active_joints())
@@ -432,18 +415,21 @@ class UR5eGridEnvwDFA(gym.Env):
         grid_dim = 3
         
         # dimesnsion of end effector position
-        eef_dim = 3
+        # eef_dim = 3
         
         # number of DFA states
         DFA_states = self.DFA_monitor.num_states
         
         # observation space dimension is sum of grid dim, eef dim, DFA state size and n_joints
-        obs_space_dimension = grid_dim + eef_dim + DFA_states + n_joints
+        obs_space_dimension = grid_dim + DFA_states + n_joints
         
         # observation space dependent on grid world
         self.observation_space = spaces.Box(
             low=-max_grid_index, high=max_grid_index, shape=(obs_space_dimension,), dtype=np.float32
         )
+
+         # Generate action map
+        self.generate_action_map()
 
         self.max_episode_steps = max_episode_steps
         
@@ -466,6 +452,60 @@ class UR5eGridEnvwDFA(gym.Env):
         self.min_distance = None
         self.distance2goal = None
         
+    def generate_action_map(self):
+        '''
+        Generate action map based on type of DFA provided
+        '''    
+        
+        if self.DFA_alphabet_dict:
+            # indicates we are dealing with a DFA that involves moving through a fixed set of configurations
+            # Action space: 6 discrete moves + num_configs DFA letters + movement to "safe" configuration
+            num_actions = len(self.DFA_alphabet_dict) + 6 + 1
+            self.action_space = spaces.Discrete(num_actions)
+
+            # initialize action map with 6 movement directions in cartesian space
+            action_cart_map = {
+                    0: [1, 0, 0],   # +x
+                    1: [-1, 0, 0],  # -x
+                    2: [0, 1, 0],   # +y
+                    3: [0, -1, 0],  # -y
+                    4: [0, 0, 1],   # +z
+                    5: [0, 0, -1],  # -z
+                    }
+            
+            
+            num_configs = len(self.DFA_alphabet_dict)
+            
+            # map discrete action → desired trajectory configs 
+            # eg we can try to reach any state in the trajectory from arbitrary grid state
+            traj_dict = {int( i + 6 ): self.DFA_alphabet_dict[f"reach_{i}"] for i in range(num_configs) }
+            safe_traj_dict = {int(num_actions): "safe_config" }
+            
+            # combine all action mappings
+            self.action_map = {**action_cart_map, **traj_dict, **safe_traj_dict}
+        else:
+            # labeling dictionary to map grid labels to DFA letters
+            '''
+            NOTE:
+            Technically, the automaton alphabet is equal to the label of indicators, but 
+            we use the current grid state label and prior grid state label to reduce 
+            the automaton alphabet from 8 letters to 4 letters for easier implementation. 
+            '''
+            self.labeling_dict = {0:"delta_x", 1:"delta_y", 2:"delta_z"}
+            
+            # Action space: 6 discrete moves
+            self.action_space = spaces.Discrete(6)
+            
+            # map discrete action → xyz translation
+            self.action_map = {
+                                0: [1, 0, 0],   # +x
+                                1: [-1, 0, 0],  # -x
+                                2: [0, 1, 0],   # +y
+                                3: [0, -1, 0],  # -y
+                                4: [0, 0, 1],   # +z
+                                5: [0, 0, -1],  # -z
+                                }
+        
     def generate_grid_world(self):
         '''
         Generate grid world based on current parameters. 
@@ -483,6 +523,54 @@ class UR5eGridEnvwDFA(gym.Env):
         self.grid_world = grid_world(start_state=selected_start_state, 
                                      goal_state=self.goal_state, 
                                      grid_size_array=self.grid_size_array)
+    
+    def joint_angle_plan(self, joint_angles: List[float]) -> Tuple:
+        '''
+        Method to move the UR5e to the specified joint angles
+        
+        Args:
+            joint_angles (list): list of joint angles to move to
+        Returns:
+            bool: True if the movement was successful, False otherwise
+        '''
+                
+        # set target joint angles in move group
+        self.UR5e_move_group.set_joint_value_target(joint_angles)
+        
+        # look for plan
+        success_bool, trajectory, plan_time, error_code = self.UR5e_move_group.plan()
+        return success_bool, trajectory, plan_time, error_code
+
+    def joint_angle_move(self, joint_angles: List[float]) -> Tuple:
+        '''
+        Method to move the UR5e to the specified joint angles
+        
+        Args:
+            joint_angles (list): list of joint angles to move to
+        Returns:
+            bool: True if the movement was successful, False otherwise
+        '''
+                
+        # set target joint angles in move group
+        self.UR5e_move_group.set_joint_value_target(joint_angles)
+        
+        # look for plan
+        success_bool, trajectory, plan_time, error_code = self.UR5e_move_group.plan()
+
+        # execute plan if found
+        if success_bool and len(trajectory.joint_trajectory.points) > 0:
+            # execute plan
+            self.UR5e_move_group.execute(trajectory, wait=True)
+            
+            # update current observation
+            self.update_obs()
+        else:
+            print("Failed to move to specified joint angles") 
+                
+        self.UR5e_move_group.clear_pose_targets()
+
+        return success_bool, trajectory, plan_time, error_code
+
     def grid_state2obs(self, state):
         return np.array(state, dtype=np.float32)
     
@@ -501,6 +589,7 @@ class UR5eGridEnvwDFA(gym.Env):
         # convert to grid state
         current_grid_state = self.grid_world.rect_pose_r2grid_state(current_pose)
         self.current_grid_state = current_grid_state
+        print(f"Current grid state updated to: {self.current_grid_state}")
         
         # update distance to goal
         self.distance2goal = self.distance(self.current_grid_state, self.grid_world.goal_state)
@@ -526,7 +615,6 @@ class UR5eGridEnvwDFA(gym.Env):
 
         # join grid state, eef pose, joint angles into single observation array
         obs_array_temp = np.array(self.current_grid_state + 
-                             [current_pose.position.x, current_pose.position.y, current_pose.position.z] + 
                              joint_angles, dtype=np.float32)
         
         # add DFA state to array
@@ -753,14 +841,69 @@ class UR5eGridEnvwDFA(gym.Env):
         
         '''
         
-        # get previous and current labels
-        prev_label_list = self.grid_state2label(self.prev_grid_state)
-        current_label_list = self.grid_state2label(self.current_grid_state)
+        # intialize letter to None
+        letter = None
         
-        # get automaton letter from labels
-        letter = self.label2auto_letter(prev_label_list, current_label_list)
-        return letter 
-       
+        # check if we have a DFA alphabet dict
+        if self.DFA_alphabet_dict:
+            # if we have a DFA alphabet dict, we are dealing with specific configurations
+            # so we can directly map the current grid state to the corresponding letter
+            for letter_iter, grid_state in self.DFA_alphabet_dict.items():
+                if grid_state == self.current_grid_state:
+                    letter = letter_iter
+                    break
+        else:
+            # if no DFA alphabet dict is present, fall back to label-based mapping
+            # get previous and current labels
+            prev_label_list = self.grid_state2label(self.prev_grid_state)
+            current_label_list = self.grid_state2label(self.current_grid_state)
+            
+            # get automaton letter from labels
+            letter = self.label2auto_letter(prev_label_list, current_label_list)
+
+        return letter
+
+    def UR5e_step(self, action) -> Tuple:
+        '''
+        Take a step in the UR5e grid world environment dictated by action
+        
+        Args:
+            action (int): discrete action to take eg move down, mode to a goal config, 
+                            or move to a safe config
+        Returns:
+            success (bool): True if the movement was successful, False otherwise
+            plan (RobotTrajectory): planned trajectory
+            plan_time (float): time taken to plan
+            error_code (MoveItErrorCodes): error code from MoveIt planning
+        '''
+        
+        # interpret if action is a movement direction or a specific configuration
+        
+        if self.action_map[action] == "safe_config":
+            # move to safe configuration
+           joint_angles = self.grid_world.safe_joint_angles
+           
+            # plan and execute joint angle move
+           success, plan, plan_time, error_code = self.joint_angle_plan(joint_angles)
+        else:
+            if isinstance(self.action_map[action], list):
+                # action is a movement direction in cartesian space
+                action_list = self.action_map[int(action)]
+
+                # compute target grid state
+                target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
+            
+            else:
+                # action is a specific configuration to move to
+                config_name = self.action_map[int(action)]
+                
+                # pull from DFA alphabet dict to get current target grid state
+                target_grid_state = self.DFA_alphabet_dict[config_name]
+
+            success, plan, plan_time, error_code = self.grid_plan(target_grid_state)
+
+        return success, plan, plan_time, error_code
+    
     def step(self, action):
         # update previous distance to goal
         self.prev_grid_state = self.current_grid_state.copy()
@@ -774,17 +917,20 @@ class UR5eGridEnvwDFA(gym.Env):
         # initialize reward with small penalty for each step to promote efficiency
         reward = -self.efficiency_penalty 
         
-        # map action to xyz translation
-        action_list = self.action_map[int(action)]
+        # # map action to xyz translation
+        # action_list = self.action_map[int(action)]
 
-        # compute target grid state
-        target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
-        target_pose = self.grid_world.grid_state2rect_pose_r(target_grid_state)
+        # # compute target grid state
+        # target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
+        # target_pose = self.grid_world.grid_state2rect_pose_r(target_grid_state)
 
-        # plan to target pose
-        self.UR5e_move_group.set_start_state_to_current_state()
-        self.UR5e_move_group.set_pose_target(target_pose, end_effector_link="tool0")
-        success, plan, plan_time, error_code = self.UR5e_move_group.plan()
+        # # plan to target pose
+        # self.UR5e_move_group.set_start_state_to_current_state()
+        # self.UR5e_move_group.set_pose_target(target_pose, end_effector_link="tool0")
+        # success, plan, plan_time, error_code = self.UR5e_move_group.plan()
+        
+        # get plan based on action
+        success, plan, plan_time, error_code = self.UR5e_step(action)
 
         # update info dictionary
         self.info_dict["plan_time"] = plan_time
@@ -840,6 +986,63 @@ class UR5eGridEnvwDFA(gym.Env):
         obs = self.current_obs
         info = self.info_dict
         return obs, reward, terminated, truncated, info
+
+    def grid_plan(self, grid_state: List[int] ):
+        '''
+        Plan path to move to specified grid state directly
+        
+        Args:
+            grid_state (list): target grid state to move to
+        '''
+        
+        target_pose = self.grid_world.grid_state2rect_pose_r(grid_state)
+
+        # set target pose in move group
+        self.UR5e_move_group.set_start_state_to_current_state()
+        self.UR5e_move_group.set_pose_target(target_pose, end_effector_link="tool0")
+        
+        # look for plan
+        success_bool, trajectory, plan_time, error_code = self.UR5e_move_group.plan()
+        
+        return success_bool, trajectory, plan_time, error_code
+
+    def grid_move(self, grid_state: List[int] ):
+        '''
+        Move UR5e to specified grid state directly
+        
+        Args:
+            grid_state (list): target grid state to move to
+        '''
+        
+        target_pose = self.grid_world.grid_state2rect_pose_r(grid_state)
+
+        # set target pose in move group
+        self.UR5e_move_group.set_start_state_to_current_state()
+        self.UR5e_move_group.set_pose_target(target_pose, end_effector_link="tool0")
+        
+        # look for plan
+        success_bool, trajectory, plan_time, error_code = self.UR5e_move_group.plan()
+        
+        # execute plan if found
+        if success_bool and len(trajectory.joint_trajectory.points) > 0:
+            # execute plan
+            self.UR5e_move_group.execute(trajectory, wait=True)
+            
+            # update current grid state
+            self.update_grid_state()
+            
+            # check if execution was success
+            if self.current_grid_state == grid_state:
+                print(f"Moved to grid state {grid_state} successfully")
+            else:
+                print(f"Still not at grid state {grid_state}, current state is {self.current_grid_state}")
+                print(f"Planned for {plan_time} seconds with error code {error_code}")
+        else:
+            print(f"Failed to plan for grid state {grid_state} using RRT connect") 
+            print(f"Planned for {plan_time} seconds with error code {error_code}")    
+        self.UR5e_move_group.clear_pose_targets()
+
+        return success_bool, trajectory, plan_time, error_code 
 
     def close(self):
         # shutdown moveit commander
@@ -945,8 +1148,8 @@ class UR5e_TQ_agent:
         
         # split observation into grid state, joint angles, DFA state
         grid_state_array  = obs[0:3]
-        joint_angle_array = obs[6:12]
-        dfa_state_array   = obs[12:]
+        joint_angle_array = obs[3:9]
+        dfa_state_array   = obs[9:]
         
         # discretize joint angles
         joint_angle_disc_array = self.true_joint_angles2discrete_joint_angles(joint_angle_array)

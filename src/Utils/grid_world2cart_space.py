@@ -26,10 +26,17 @@ class grid_world:
                  goal_state: Optional[Sequence[int]] = [-1, -1, 1],
                  arm_radius: Optional[float] = 0.850, 
                  coordinate_system: Optional[str] = "UR5e_cent_rect", 
-                 grid_size_array: Optional[Sequence[float]] = [0.25, 0.25, 0.25]):
+                 grid_size_array: Optional[Sequence[float]] = [0.25, 0.25, 0.25], 
+                 safe_joint_angles: Optional[Sequence[float]] = None):
        # Ur5e radius at maximum extension
        self.arm_radius = arm_radius
        
+       # safe joint angles for ur5e
+       if safe_joint_angles is None:
+           self.safe_joint_angles = [0.0, -np.pi/2, np.pi/2, 0.0, np.pi/2, 0.0]
+       else:
+           self.safe_joint_angles = safe_joint_angles
+
        # Choice of coordinate system
        self.coordinate_system = coordinate_system
        

@@ -345,6 +345,74 @@ def create_UR5e_xyz_DFA(version: Optional[str] = 'strict',
 
     return UR5e_DFA, potential_dict
 
+def create_UR5e_traj_DFA(trajectory: List[ List[ int ] ], 
+                         potential_delta: Optional[float] = 1.0) -> Tuple:
+    '''
+    Creates DFA for UR5e for following a given trajectory in grid space
+    Args:
+    trajectory: List[ List[ int ] ] - the trajectory to follow
+    potential_delta: float - describes the difference in values 
+                            for the potential function at each state
+    Returns:
+    UR5e_DFA - DFA object from automata-lib representing the trajectory following task
+    potential_dict - dictionary mapping between automaton states and potential function values
+    alphabet_dict - dictionary mapping between input symbols and grid states
+    '''
+    num_configs = len( trajectory )
+    
+    # number of automaton states is number of configurations + 1 (final state)
+    states = { str(i) for i in range(num_configs+1) }
+    initial_state = '0'
+    final_states = { str( num_configs ) }
+    
+    # reach_x means reaching the x index of trajectory
+    input_symbols = { f"reach_{i}" for i in range(num_configs) }
+    
+    # dictionary to mapy input symbols to grid states
+    alphabet_dict = { f"reach_{i}": trajectory[i] for i in range(num_configs) }
+    
+    # empty transition dictionary and potential function dictionary that is filled below
+    transitions = {}
+    potential_dict = {}
+    
+    for state in states: 
+        # get the index of the current state
+        state_index = int(state)
+        
+        # initialize empty dictionary for each state
+        transitions[state] = {}
+        
+        # assign potential value for each state
+        potential_dict[state] = potential_delta * state_index
+        
+        # unique symbol describing forward progress to the next state
+        forward_progress_symbol = f"reach_{state_index}"
+        
+        # indicating that the ur5e has reached the next config
+        forward_progress_symbol = f"reach_{state_index}"
+        
+        # fill dictionary with all input symbols
+        for symbol in input_symbols:
+            # check if symbol indicates forward progress
+            if symbol == forward_progress_symbol:
+                # add transition for progress to next state
+                next_state = str( state_index + 1 )
+                transitions[state][symbol] = next_state
+            else:
+                # no progress, stay in current state
+                transitions[state][symbol] = state
+    
+    # create DFA object
+    UR5e_DFA = DFA(
+        states=states,
+        initial_state=initial_state,
+        final_states=final_states,
+        input_symbols=input_symbols,
+        transitions=transitions
+    )
+
+    return UR5e_DFA, potential_dict, alphabet_dict
+
 def frac(a, b):
     return sp.Rational(a, b)
 

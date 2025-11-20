@@ -7,36 +7,64 @@ from geometry_msgs.msg import Pose
 from src.Utils.grid_world2cart_space import grid_world
 from src.Utils.misc import add_table2scene
 from src.Utils.gym_envs import UR5eGridEnv, UR5eGridEnvwDFA
-from src.Utils.AUTOMATA.auto_funcs import create_UR5e_xyz_DFA, DFAMonitor
+from src.Utils.AUTOMATA.auto_funcs import create_UR5e_xyz_DFA, DFAMonitor, create_UR5e_traj_DFA
 from typing import Optional, Sequence   
 
 # booleaan for which environment to test
 DFA_bool = True
+traj_DFA_bool = True
+reward_tracking_bool = False
 
 if DFA_bool:
-    # environment with DFA monitor
-    ur5e_DFA, potentials = create_UR5e_xyz_DFA()
-    dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials)
-    
-    # hard settings
-    # start_state = [2,2,5]
-    # goal_state = [-3, -3, 3]
-    # grid_size_array = [0.10, 0.10, 0.10]
+    if traj_DFA_bool:
+        trajecory = [
+                      [3, 3, 4],
+                      [3, 4, 4]
+                              ] 
+        # environment with trajectory DFA monitor
+        ur5e_DFA, potentials, alphabet_dict = create_UR5e_traj_DFA(trajectory=trajecory)
+        
+        dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials)
+        
+        # hard settings
+        start_state = [2,2,5]
+        goal_state = [-3, -3, 3]
+        grid_size_array = [0.15, 0.15, 0.15]
 
-    # easy settings
-    start_state = [2,2,3]
-    goal_state = [1, 1, 2]
-    grid_size_array = [0.25, 0.25, 0.25 ]
+        # easy settings
+        # start_state = [-2,-2,2]
+        # goal_state = [-2, 1, 2]
+        # grid_size_array = [0.25, 0.25, 0.25 ]
 
 
-    env = UR5eGridEnvwDFA(start_states=start_state, 
-                        goal_state=goal_state, 
-                        grid_size_array=grid_size_array, 
-                        DFA_monitor=dfa_monitor)
+        env = UR5eGridEnvwDFA(start_states=start_state, 
+                            goal_state=goal_state, 
+                            grid_size_array=grid_size_array, 
+                            DFA_monitor=dfa_monitor, 
+                            DFA_alphabet_dict=alphabet_dict)
+    else:
+        # original dfa test 
+        # environment with DFA monitor
+        ur5e_DFA, potentials = create_UR5e_xyz_DFA()
+        dfa_monitor = DFAMonitor(ur5e_DFA, potential_dict=potentials)
+        
+        # hard settings
+        start_state = [2,2,5]
+        goal_state = [-3, -3, 3]
+        grid_size_array = [0.15, 0.15, 0.15]
+
+        # easy settings
+        # start_state = [-2,-2,2]
+        # goal_state = [-2, 1, 2]
+        # grid_size_array = [0.25, 0.25, 0.25 ]
+
+
+        env = UR5eGridEnvwDFA(start_states=start_state, 
+                            goal_state=goal_state, 
+                            grid_size_array=grid_size_array, 
+                            DFA_monitor=dfa_monitor)
 else:
     env = UR5eGridEnv()
-
-
 
 # environment with DFA monitor
 # env.move2start_state_slow()
@@ -89,9 +117,26 @@ total_reward = 0.0
 #                3, 3, 3, 3, 3,
 #                5, 5]
 
-# action plan for easy settings with grid size of 0.25m
-action_plan = [3,1,5]
+# action_plan = [3, 3, 3, 3, 3,
+#                1, 1, 1, 1, 1,
+#                5, 5]
 
+action_plan = [6,7]
+
+# action plan for easy settings with grid size of 0.25m
+# action_plan = [1, 1, 1, 1,
+#                3,
+#                5]
+
+# action_plan = [5, 5, 5, 5]
+
+# # trajectory that ignores actions
+# trajectory = [
+#               [1, 1, 1], 
+#               [2, 2, 2]
+#               ]
+
+# action space is used
 for action in action_plan:
     print(f"Planned Action: {env.action_map[int(action)]}")
     obs, reward, terminated, truncated, info = env.step(action)
@@ -102,13 +147,9 @@ for action in action_plan:
         print("Reached terminal state.")
         break
     
-# while not done:
-#     action = env.action_space.sample()  # random action
-#     print(f"Sampled Action: {env.action_map[int(action)]}")
-#     obs, reward, terminated, truncated, info = env.step(action)
-#     total_reward += reward
-#     done = terminated or truncated
-#     print(f"Step: {env.current_step}, Action: {action}, Observation: {obs}, Reward: {reward}")
+        
+     
+    
 
-print(f"Episode finished. Total Reward: {total_reward}")
-env.close()
+# print(f"Episode finished. Total Reward: {total_reward}")
+# env.close()
