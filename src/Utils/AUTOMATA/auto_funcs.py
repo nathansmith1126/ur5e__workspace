@@ -413,6 +413,149 @@ def create_UR5e_traj_DFA(trajectory: List[ List[ int ] ],
 
     return UR5e_DFA, potential_dict, alphabet_dict
 
+def create_fetch_return_DFA(grid_state: Optional[ List[ int ] ] = [2, 2, 5] ) -> Tuple:
+    '''
+    Fetch and return task DFA and potential dictionary
+    Args:
+    grid_state: List[ int ] - target grid state for fetch and return task 
+        meant to mimic the location of an object to be fetched
+    Returns:
+    fetch_return_DFA - DFA object from automata-lib representing the fetch and return task
+    potential_dict - dictionary mapping between automaton states and potential function values
+    DFA_alphabet_dict - dictionary mapping between input symbols and grid states
+    '''
+    input_symbols = {"object_fetched", "object_returned", "no_change"}
+    states = {"0", "1", "2"}
+    initial_state = "0"
+    final_states = {"2"}
+    transitions = {
+        "0": {
+            "object_fetched": "1",
+            "no_change": "0",
+            "object_returned": "0"
+            }, 
+        "1": {
+            "object_returned": "2",
+            "no_change": "1",
+            "object_fetched": "1"
+            },
+        "2": {
+            "no_change": "2",
+            "object_fetched": "2",
+            "object_returned": "2"
+            }
+    }
+    potential_dict = {
+        "0": 0,
+        "1": 1.0,
+        "2": 2.0
+    }
+    
+    DFA_alphabet_dict = {
+        "object_fetched": grid_state,
+        "object_returned": "Empty_Home_Position"
+    }
+    
+    fetch_return_DFA = DFA(
+        states=states,
+        initial_state=initial_state,
+        final_states=final_states,
+        input_symbols=input_symbols,
+        transitions=transitions
+    )
+    
+
+    return fetch_return_DFA, potential_dict, DFA_alphabet_dict
+
+def create_flex_start_fixed_finish_DFA(middle_states: List[ List[int] ], 
+                                        goal_state: List[ int ] ) -> Tuple:
+    '''
+    Creates DFA for UR5e for reaching a fixed goal state from multiple possible start states
+    Args:
+    middle_states: List[ List[ int ] ] - list of possible intermediary states
+    goal_state: List[ int ] - fixed goal state to reach
+    Returns:
+    flex_start_fixed_finish_DFA - DFA object from automata-lib representing the reaching task
+    potential_dict - dictionary mapping between automaton states 
+                    and potential function values. Value of final state is 2, 
+                    middle states have value = 1, 
+                    and inital state has value = 0.
+    alphabet_dict - dictionary mapping between input symbols and grid states
+    '''
+    num_middle_states = len( middle_states )
+    
+    # number of automaton states is number of start states
+    # + 1 (start state) + 1 (final state)
+    states = { str(i) for i in range(num_middle_states+2) }
+    initial_state = '0'
+    final_states = { str( num_middle_states + 1 ) }
+
+    # reach_x means reaching the x index of trajectory
+    input_symbols = { f"reach_{i+1}" for i in range( num_middle_states + 1) }
+
+    # middle symbols to reach middle states
+    middle_symbols = { f"reach_{i+1}" for i in range( num_middle_states ) }
+
+    # final symbol
+    final_symbol = f"reach_{num_middle_states + 1}"
+    
+    # dictionary to mapy input symbols to grid states
+    alphabet_dict = { f"reach_{i+1}": middle_states[i] for i in range(num_middle_states) }
+
+    # add goal state to alphabet dict
+    alphabet_dict[f"reach_{num_middle_states + 1}"] = goal_state
+
+    # empty transition dictionary and potential function dictionary that is filled below
+    transitions = {}
+    potential_dict = {}
+    
+    # iterate over all states and input symbols
+    for state in states:
+        # initialize empty dictionary for each state
+        transitions[state] = {}
+        for symbol in input_symbols:
+        # check if state is inital or final state            
+            if state == initial_state:
+                potential_dict[state] = 0
+                # for initial state, symbols lead to middle states or
+                # stay in initial state
+                if symbol in middle_symbols:
+                    # add transition for progress to middle state
+                    next_index = symbol[-1]
+                    next_state = str(int(next_index))
+                    transitions[state][symbol] = next_state
+                else:
+                    # no progress, stay in current state 
+                    # symbol = reach_"final_state"
+                    transitions[state][symbol] = state
+            elif state in final_states:
+                # every symbol leads to a self loop in final state
+                transitions[state][symbol] = state
+                
+                # fill potential dict for final state
+                potential_dict[state] = 2.0
+            else:
+                # for middle states, symbols lead to final state or
+                # stay in middle state
+                potential_dict[state] = 1.0
+                if symbol == final_symbol:
+                    # add transition for progress to final state
+                    next_state = str( num_middle_states + 1 )
+                    transitions[state][symbol] = next_state
+                else:
+                    # no progress, stay in current state 
+                    transitions[state][symbol] = state
+                
+      
+    flex_start_fixed_finish_DFA = DFA( states=states,
+                                       initial_state=initial_state,
+                                       final_states=final_states,
+                                       input_symbols=input_symbols,
+                                       transitions=transitions
+    )
+
+    return flex_start_fixed_finish_DFA, potential_dict, alphabet_dict
+
 def frac(a, b):
     return sp.Rational(a, b)
 

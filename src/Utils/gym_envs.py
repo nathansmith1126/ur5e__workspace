@@ -3,13 +3,18 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import rospy
+import inspect 
+import os, pickle 
 import moveit_commander
+import tf.transformations as T
 from geometry_msgs.msg import Pose
+from gazebo_msgs.srv import SpawnModel, DeleteModel
 from src.Utils.grid_world2cart_space import grid_world
-from src.Utils.misc import add_table2scene
+from src.Utils.misc import add_table2scene, add_gripper2scene
 from src.Utils.AUTOMATA.auto_funcs import DFAMonitor
 from typing import Optional, Sequence, List, Tuple, Dict, Union
 from collections import defaultdict
+from datetime import datetime 
 
 class UR5eGridEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -117,7 +122,6 @@ class UR5eGridEnv(gym.Env):
         # update distance to goal
         self.distance2goal = self.distance(self.current_grid_state, self.grid_world.goal_state)
         
-
     def move2start_state(self):
         '''
         Move UR5e to start state defined in grid world
@@ -358,7 +362,10 @@ class UR5eGridEnvwDFA(gym.Env):
                  auto_reward_scaler: Optional[float] = 4.0,
                  efficiency_penalty: Optional[float] = 0.01, 
                  pos_tolerance: Optional[float] = 0.05,
-                 plan_time: Optional[float] = 3.0,):
+                 plan_time: Optional[float] = 3.0,
+                 gazebo_bool: Optional[bool] = True, 
+                 safe_configs: Optional[List[List[float]]] = None, 
+                 fetch_return_bool: Optional[bool] = False):
         super().__init__()
         
         # Initialize moveit planning node
@@ -366,15 +373,29 @@ class UR5eGridEnvwDFA(gym.Env):
         
         # initialize this script as a ROS node
         rospy.init_node("ur5e_grid_env", anonymous=True)
-
+        
+        # bool to indicate if we are running in gazebo
+        self.gazebo_bool = gazebo_bool
+        
+        # check if we are working with the tech and return objective for a range of initial states
+        self.fetch_return_bool = fetch_return_bool 
+        
+        # bool to indicate if we are using a series of radial safe states instead of a grid
+        self.safe_configs = safe_configs
+        
         # Initialize custom grid world parameters
         self.start_states = start_states
         self.goal_state = goal_state
         self.grid_size_array = grid_size_array
         
+        # initialize DFA monitor for temporal rewards 
+        self.DFA_monitor = DFA_monitor
+        
+        # optional alphabet dictionary to map grid labels to DFA letters (IF NECESSARY)
+        self.DFA_alphabet_dict = DFA_alphabet_dict
+        
         # Generate grid world
         self.generate_grid_world()
-    
         
         # Initialize MoveIt interfaces
         self.robot = moveit_commander.RobotCommander() # interface to the robot
@@ -388,22 +409,28 @@ class UR5eGridEnvwDFA(gym.Env):
         # add work table to the scene
         add_table2scene(self.robot, self.scene)
         
+        # add gripper to end effector
+        add_gripper2scene(move_group=self.UR5e_move_group, 
+                          scene=self.scene)
+        
         # add position tolerances for moveit
+        self.pos_tolerance = pos_tolerance
         self.UR5e_move_group.set_goal_position_tolerance(pos_tolerance) # 5mm
         
         # add time allowance for planning
-        self.UR5e_move_group.set_planning_time(plan_time) # 5 seconds
+        self.plan_time = plan_time
+        self.UR5e_move_group.set_planning_time(plan_time) #seconds
 
         # initialize info dictionary that is returned at each bym env step
         # It will house planning time and error codes from MoveIt
         
-        self.info_dict = {"plan_time": None, "error_code": None}
+        self.info_dict = {"plan_time": None, 
+                          "error_code": None,
+                          "success_plan_bool": None, 
+                          "success_exec_bool": None}
         
-        # initialize DFA monitor for temporal rewards 
-        self.DFA_monitor = DFA_monitor 
-        
-        # optional alphabet dictionary to map grid labels to DFA letters (IF NECESSARY)
-        self.DFA_alphabet_dict = DFA_alphabet_dict
+        # initialize list of waypoint names for gazebo visualization
+        self.waypoint_names = []
       
         # used to determine observation space limits, 7 is overestimation of 2pi to account for joint angles 
         max_grid_index = max( (np.ceil( 2*self.grid_world.arm_radius / self.grid_world.min_thickness ), 7.0 ) )
@@ -428,7 +455,9 @@ class UR5eGridEnvwDFA(gym.Env):
             low=-max_grid_index, high=max_grid_index, shape=(obs_space_dimension,), dtype=np.float32
         )
 
-         # Generate action map
+        # Generate action map and initialize action maps
+        self.action_map_safe = {}
+        self.action_map_traj = {}
         self.generate_action_map()
 
         self.max_episode_steps = max_episode_steps
@@ -452,37 +481,101 @@ class UR5eGridEnvwDFA(gym.Env):
         self.min_distance = None
         self.distance2goal = None
         
+    def get_env_info(self):
+        '''
+        Method to return current dictionary containing environment initialization information
+        associated with goal states, rewards, dfa etc
+        Returns:
+            env_info_dict (dict): dictionary containing environment information
+        '''
+        env_info_dict = {
+            "start_states": self.start_states,
+            "goal_state": self.goal_state,
+            "grid_size_array": self.grid_size_array,
+            "DFA_monitor": self.DFA_monitor,
+            "DFA_alphabet_dict": self.DFA_alphabet_dict,
+            "max_episode_steps": self.max_episode_steps,
+            "safe_configs": self.safe_configs,
+            "max_episode_steps": self.max_episode_steps,
+            "failed_trans_penalty": self.failed_trans_penalty,
+            "closer2goal_reward": self.closer2goal_reward,
+            "closest2goal_reward": self.closest2goal_reward,
+            "completion_reward": self.completion_reward,
+            "auto_reward_scaler": self.auto_reward_scaler,
+            "efficiency_penalty": self.efficiency_penalty,  
+            "pos_tolerance": self.pos_tolerance,
+            "plan_time": self.plan_time, 
+            "fetch_return_bool": self.fetch_return_bool
+        }
+        
+            # def __init__(self, 
+            #      start_states: Union[List[List[int]], List[int]], 
+            #      goal_state: List[int], 
+            #      grid_size_array: List[float],
+            #      DFA_monitor: DFAMonitor, 
+            #      DFA_alphabet_dict: Dict[int, str] = None,
+            #      max_episode_steps: Optional[int] = 50, 
+            #      failed_trans_penalty: Optional[float] = 0.1, 
+            #      closer2goal_reward: Optional[float] = 0.01,
+            #      closest2goal_reward: Optional[float] = 0.1, 
+            #      completion_reward: Optional[float] = 1.0, 
+            #      auto_reward_scaler: Optional[float] = 4.0,
+            #      efficiency_penalty: Optional[float] = 0.01, 
+            #      pos_tolerance: Optional[float] = 0.05,
+            #      plan_time: Optional[float] = 3.0,
+            #      gazebo_bool: Optional[bool] = True, 
+            #      safe_configs: Optional[List[List[float]]] = None):
+            
+        return env_info_dict 
+        
     def generate_action_map(self):
         '''
         Generate action map based on type of DFA provided
         '''    
         
         if self.DFA_alphabet_dict:
-            # indicates we are dealing with a DFA that involves moving through a fixed set of configurations
-            # Action space: 6 discrete moves + num_configs DFA letters + movement to "safe" configuration
-            num_actions = len(self.DFA_alphabet_dict) + 6 + 1
-            self.action_space = spaces.Discrete(num_actions)
+            if self.safe_configs is not None:
+                # only configs of interest are those in the trajectory + safe configs
+                self.num_actions = len(self.DFA_alphabet_dict) + len(self.safe_configs)
+                
+                # 1 integer action per trajectory config + safe config
+                self.action_space = spaces.Discrete(self.num_actions)
+                
+                # map discrete action → desired trajectory configs
+                self.action_map_traj = {i: config for i, config in enumerate(self.DFA_alphabet_dict.values())}
+                
+                # map discrete action → safe configs
+                self.action_map_safe = {i + len(self.DFA_alphabet_dict): config for i, config in enumerate(self.safe_configs)}
+                
+                # combine all action mappings
+                self.action_map = {**self.action_map_traj, **self.action_map_safe}
+            else:
+                # configs of interest are grid world, safe config and trajectory configs
+                # indicates we are dealing with a DFA that involves moving through a fixed set of configurations
+                # Action space: 6 discrete moves + num_configs DFA letters + movement to "safe" configuration
+                self.num_actions = len(self.DFA_alphabet_dict) + 6 + 1
+                self.action_space = spaces.Discrete(self.num_actions)
 
-            # initialize action map with 6 movement directions in cartesian space
-            action_cart_map = {
-                    0: [1, 0, 0],   # +x
-                    1: [-1, 0, 0],  # -x
-                    2: [0, 1, 0],   # +y
-                    3: [0, -1, 0],  # -y
-                    4: [0, 0, 1],   # +z
-                    5: [0, 0, -1],  # -z
-                    }
-            
-            
-            num_configs = len(self.DFA_alphabet_dict)
-            
-            # map discrete action → desired trajectory configs 
-            # eg we can try to reach any state in the trajectory from arbitrary grid state
-            traj_dict = {int( i + 6 ): self.DFA_alphabet_dict[f"reach_{i}"] for i in range(num_configs) }
-            safe_traj_dict = {int(num_actions): "safe_config" }
-            
-            # combine all action mappings
-            self.action_map = {**action_cart_map, **traj_dict, **safe_traj_dict}
+                # initialize action map with 6 movement directions in cartesian space
+                action_cart_map = {
+                        0: [1, 0, 0],   # +x
+                        1: [-1, 0, 0],  # -x
+                        2: [0, 1, 0],   # +y
+                        3: [0, -1, 0],  # -y
+                        4: [0, 0, 1],   # +z
+                        5: [0, 0, -1],  # -z
+                        }
+                
+                
+                num_configs = len(self.DFA_alphabet_dict)
+                
+                # map discrete action → desired trajectory configs 
+                # eg we can try to reach any state in the trajectory from arbitrary grid state
+                traj_dict = {int( i + 6 ): self.DFA_alphabet_dict[f"reach_{i}"] for i in range(num_configs) }
+                safe_traj_dict = {int(self.num_actions-1): "safe_config" }
+                
+                # combine all action mappings
+                self.action_map = {**action_cart_map, **traj_dict, **safe_traj_dict}
         else:
             # labeling dictionary to map grid labels to DFA letters
             '''
@@ -519,7 +612,12 @@ class UR5eGridEnvwDFA(gym.Env):
         else: 
             # single start state
             selected_start_state = self.start_states    
+            
+        # add selected start state to DFA_alphabet_dict if applicable
+        if self.fetch_return_bool and self.DFA_alphabet_dict is not None:
+            self.DFA_alphabet_dict["object_returned"] = selected_start_state
         
+        # initialize grid_world
         self.grid_world = grid_world(start_state=selected_start_state, 
                                      goal_state=self.goal_state, 
                                      grid_size_array=self.grid_size_array)
@@ -561,8 +659,7 @@ class UR5eGridEnvwDFA(gym.Env):
         if success_bool and len(trajectory.joint_trajectory.points) > 0:
             # execute plan
             self.UR5e_move_group.execute(trajectory, wait=True)
-            
-            # update current observation
+            print("Moved to specified joint angles")
             self.update_obs()
         else:
             print("Failed to move to specified joint angles") 
@@ -633,38 +730,62 @@ class UR5eGridEnvwDFA(gym.Env):
         
         start_pose = self.grid_world.grid_state2rect_pose_r(self.grid_world.start_state)
 
-        # set target pose in move group
-        self.UR5e_move_group.set_pose_target(start_pose, end_effector_link="tool0")
-        
-        # look for plan
-        success_bool, trajectory, _, _ = self.UR5e_move_group.plan()
-        
-        # execute plan if found
-        if success_bool and len(trajectory.joint_trajectory.points) > 0:
-            # execute plan
-            self.UR5e_move_group.execute(trajectory, wait=True)
+        while not self.reset_success_bool:
+            # repeat loop until we reach start state
+            print("Attempting to move to start state...")
+            self.grid_move(self.grid_world.start_state)
             
-            # update current grid state
-            self.update_grid_state()
-            
-            # check if execution was success
             if self.current_grid_state == self.grid_world.start_state:
                 self.reset_success_bool = True
-                print("Moved to start state successfully using one-shot approach")
+                print("Moved to start state successfully")
             else:
-                print("Still not at start state, retrying...")
+                print("Still not at start state, retrying...")  
+                # tray again after moving to a random safe config if available
+                if self.safe_configs is not None:
+                    rand_index = np.random.randint(0, len(self.safe_configs))
+                    safe_config = self.safe_configs[rand_index]
+                    print(f"Moving to random safe config: {safe_config} before retrying...")
+                    self.joint_angle_move(safe_config)
+            
+            
+            
+        # # set target pose in move group
+        # self.UR5e_move_group.set_pose_target(start_pose, end_effector_link="tool0")
+        
+        # # look for plan
+        # success_bool, trajectory, _, _ = self.UR5e_move_group.plan()
+        
+        # # execute plan if found
+        # if success_bool and len(trajectory.joint_trajectory.points) > 0:
+        #     # execute plan
+        #     self.UR5e_move_group.execute(trajectory, wait=True)
+            
+        #     # update current grid state
+        #     self.update_grid_state()
+            
+        #     # check if execution was success
+        #     if self.current_grid_state == self.grid_world.start_state:
+        #         self.reset_success_bool = True
+        #         print("Moved to start state successfully using one-shot approach")
+        #     else:
+        #         print("Still not at start state, retrying...")
                 
-        else:
-            print("Failed to move to start state using oneshot RRT, switching methods") 
-            # keep trying to move to start state using step-by-step approach
-            while not self.reset_success_bool:
-                self.move2start_state_slow()
-                if self.current_grid_state == self.grid_world.start_state:
-                    self.reset_success_bool = True
-                    print("Moved to start state successfully using step-by-step approach")
-                else:
-                    print("Still not at start state, retrying...")
-                
+        # else:
+            
+        #     if self.safe_configs is None:
+        #         print("Failed to move to start state using oneshot RRT, switching methods") 
+        #         # keep trying to move to start state using step-by-step approach
+        #         while not self.reset_success_bool:
+        #             self.move2start_state_slow()
+        #             if self.current_grid_state == self.grid_world.start_state:
+        #                 self.reset_success_bool = True
+        #                 print("Moved to start state successfully using step-by-step approach")
+        #             else:
+        #                 print("Still not at start state, retrying...")
+        #     else:
+        #         # 
+        #         pass
+
         self.UR5e_move_group.clear_pose_targets()
         
     def move2start_state_slow(self):
@@ -742,6 +863,11 @@ class UR5eGridEnvwDFA(gym.Env):
         
         # generate grid world
         self.generate_grid_world()
+        
+        # generate action map if fetch and return task since 
+        # action map depends on selected start state
+        if self.fetch_return_bool:
+            self.generate_action_map()
         
         # move to start state
         self.move2start_state()
@@ -879,28 +1005,45 @@ class UR5eGridEnvwDFA(gym.Env):
         
         # interpret if action is a movement direction or a specific configuration
         
-        if self.action_map[action] == "safe_config":
-            # move to safe configuration
-           joint_angles = self.grid_world.safe_joint_angles
-           
-            # plan and execute joint angle move
-           success, plan, plan_time, error_code = self.joint_angle_plan(joint_angles)
-        else:
-            if isinstance(self.action_map[action], list):
-                # action is a movement direction in cartesian space
-                action_list = self.action_map[int(action)]
-
-                # compute target grid state
-                target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
+        if self.safe_configs:
+            # no frid world movement, only safe config or specific configurations
+            target_state = self.action_map[action] # could be joint angles or grid state
             
-            else:
-                # action is a specific configuration to move to
-                config_name = self.action_map[int(action)]
+            # determine if action is joint angles or grid state
+            if len(target_state) == len(self.UR5e_move_group.get_active_joints()):
+                # action is joint angles
+                joint_angles = target_state
                 
-                # pull from DFA alphabet dict to get current target grid state
-                target_grid_state = self.DFA_alphabet_dict[config_name]
+                # plan and execute joint angle move
+                success, plan, plan_time, error_code = self.joint_angle_plan(joint_angles)
+            else:
+                # action is grid state
+                grid_state = target_state
+                
+                success, plan, plan_time, error_code = self.grid_plan(grid_state)
+        else:
+            # grid world movement + specific configurations + safe config
+            if self.action_map[action] == "safe_config":
+                # move to safe configuration
+                joint_angles = self.grid_world.safe_joint_angles
+            
+                # plan and execute joint angle move
+                success, plan, plan_time, error_code = self.joint_angle_plan(joint_angles)
+            else:
+                # We are moving to a grid state either through cartesian movement or specific configuration
+                if action in range(6):
+                    # action is a movement direction in cartesian space 0<=action<=5 for cartesian movement
+                    action_list = self.action_map[int(action)]
 
-            success, plan, plan_time, error_code = self.grid_plan(target_grid_state)
+                    # compute target grid state
+                    target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
+                
+                else:
+                    # action is a specific configuration to move to
+                    target_grid_state = self.action_map[int(action)]
+                
+
+                success, plan, plan_time, error_code = self.grid_plan(target_grid_state)
 
         return success, plan, plan_time, error_code
     
@@ -917,24 +1060,13 @@ class UR5eGridEnvwDFA(gym.Env):
         # initialize reward with small penalty for each step to promote efficiency
         reward = -self.efficiency_penalty 
         
-        # # map action to xyz translation
-        # action_list = self.action_map[int(action)]
-
-        # # compute target grid state
-        # target_grid_state = self.grid_world.grid_iso_step(action_list, self.current_grid_state)
-        # target_pose = self.grid_world.grid_state2rect_pose_r(target_grid_state)
-
-        # # plan to target pose
-        # self.UR5e_move_group.set_start_state_to_current_state()
-        # self.UR5e_move_group.set_pose_target(target_pose, end_effector_link="tool0")
-        # success, plan, plan_time, error_code = self.UR5e_move_group.plan()
-        
         # get plan based on action
         success, plan, plan_time, error_code = self.UR5e_step(action)
 
         # update info dictionary
         self.info_dict["plan_time"] = plan_time
         self.info_dict["error_code"] = error_code
+        self.info_dict["success_plan_bool"] = success
         
         # initialize reward and termination flags
         terminated = False
@@ -943,7 +1075,10 @@ class UR5eGridEnvwDFA(gym.Env):
         # execute if plan is successful
         if success and len(plan.joint_trajectory.points) > 0:
             # execute plan
-            self.UR5e_move_group.execute(plan, wait=True)
+            success_exec_bool = self.UR5e_move_group.execute(plan, wait=True)
+            
+            # update information dictionary with progress
+            self.info_dict["success_exec_bool"] = success_exec_bool
             
             # update current grid state and observation
             self.update_obs()
@@ -956,6 +1091,7 @@ class UR5eGridEnvwDFA(gym.Env):
             # update DFA monitor state
             self.DFA_monitor.step(auto_letter)
             
+            # analyze DFAnfinality to determine reward/penalty
             if self.DFA_monitor.current_state == 'sink':
                 # check if we entered sink state or 
                 # impossible transition
@@ -972,16 +1108,26 @@ class UR5eGridEnvwDFA(gym.Env):
             
             # add potential difference reward from DFA monitor multiplied by scaler
             # to reward forward progress and punish backward progress
-            reward += self.auto_reward_scaler * self.DFA_monitor.delta_potential
+            # if a letter is passed into DFA monitor
+            # DFA monitor
+            if auto_letter:
+                reward += self.auto_reward_scaler * self.DFA_monitor.delta_potential
+                
+            # check if chosen action produced intended motion
+            if not success_exec_bool:
+                # failed during path execution and ended in unexpected state
+                reward -= self.failed_trans_penalty
         else:
-            # subtract penalty for failure to execute
+            # subtract penalty for failure to plan
             reward -= self.failed_trans_penalty
+            
+            # failure to plan implies failure to execute
+            self.info_dict["success_exec_bool"] = False
 
         # check for truncation
         if self.current_step >= self.max_episode_steps:
             truncated = True
-            print("Truncation - too many steps")
-            
+            print("Truncation - too many steps")            
 
         obs = self.current_obs
         info = self.info_dict
@@ -1006,12 +1152,13 @@ class UR5eGridEnvwDFA(gym.Env):
         
         return success_bool, trajectory, plan_time, error_code
 
-    def grid_move(self, grid_state: List[int] ):
+    def grid_move(self, grid_state: List[int], plot_bool: Optional[bool]=False):
         '''
         Move UR5e to specified grid state directly
         
         Args:
             grid_state (list): target grid state to move to
+            plot_bool (bool): boolean indicating whether or not to plot the trajectory
         '''
         
         target_pose = self.grid_world.grid_state2rect_pose_r(grid_state)
@@ -1037,6 +1184,10 @@ class UR5eGridEnvwDFA(gym.Env):
             else:
                 print(f"Still not at grid state {grid_state}, current state is {self.current_grid_state}")
                 print(f"Planned for {plan_time} seconds with error code {error_code}")
+                
+            # plot if desired
+            if plot_bool:
+                self.grid_world.plot_plan_trajectories(plan=trajectory)
         else:
             print(f"Failed to plan for grid state {grid_state} using RRT connect") 
             print(f"Planned for {plan_time} seconds with error code {error_code}")    
@@ -1044,10 +1195,185 @@ class UR5eGridEnvwDFA(gym.Env):
 
         return success_bool, trajectory, plan_time, error_code 
 
+    def spawn_sphere(self, name, radius_m, x, y, z, roll=0, pitch=0, yaw=0,
+                 static=True, collide=False, reference_frame="world", 
+                 color_rgb=(1,0,0), emissive_scale=0.25):
+        '''
+        Spawn a sphere in the Gazebo simulation environment.
+        Args:
+            name (str): Name of the sphere model.
+            radius_m (float): Radius of the sphere in meters.
+            x (float): X position of the sphere center.
+            y (float): Y position of the sphere center.
+            z (float): Z position of the sphere center.
+            roll (float): Roll orientation in radians.
+            pitch (float): Pitch orientation in radians.
+            yaw (float): Yaw orientation in radians.
+            static (bool): Whether the sphere is static or dynamic.
+            collide (bool): Whether the sphere has collision properties.
+            reference_frame (str): Reference frame for the sphere's initial pose.
+            color_rgb (tuple): RGB color values for the sphere.
+            emissive_scale (float): Emissive scale for the sphere's material.
+        Returns:
+            SpawnModelResponse: Response from the spawn service.
+        '''
+        
+        SDF_TPL = """<?xml version="1.0"?>
+                        <sdf version="1.6">
+                        <model name="{name}">
+                            <static>{static}</static>
+                            <link name="link">
+                            {collision_block}
+                            <visual name="vis">
+                                <geometry><sphere><radius>{radius}</radius></sphere></geometry>
+                                <material>
+                                <ambient>1 0 0 1</ambient>
+                                <diffuse>1 0 0 1</diffuse>
+                                <emissive>0.25 0 0 1</emissive>
+                                </material>
+                            </visual>
+                            </link>
+                        </model>
+                        </sdf>"""
+                                
+       # clamp helper function to ensure color values are in [0,1]
+        def clamp01(v): return max(0.0, min(1.0, float(v)))
+        r, g, b = (clamp01(c) for c in color_rgb)
+        a = 1.0
+        er, eg, eb, ea = (clamp01(emissive_scale * r),
+                        clamp01(emissive_scale * g),
+                        clamp01(emissive_scale * b), 1.0)
+
+        # define material block with specified colors for sphere
+        MATERIAL_BLOCK = f"""
+        <material>
+            <ambient>{r} {g} {b} {a}</ambient>
+            <diffuse>{r} {g} {b} {a}</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <emissive>{er} {eg} {eb} {ea}</emissive>
+        </material>"""
+
+        # define SDF template for the sphere with material block
+        SDF_TPL = f"""<?xml version="1.0"?>
+    <sdf version="1.6">
+    <model name="{{name}}">
+        <static>{{static}}</static>
+        <link name="link">
+        {{collision_block}}
+        <visual name="vis">
+            <geometry><sphere><radius>{{radius}}</radius></sphere></geometry>
+            {MATERIAL_BLOCK}
+        </visual>
+        </link>
+    </model>
+    </sdf>"""
+
+        # define collision block based on collide flag
+        COLLISION_BLOCK = """<collision name="col">
+    <geometry><sphere><radius>{radius}</radius></sphere></geometry>
+    </collision>"""
+        NO_COLLISION_BLOCK = ""
+
+        # create service proxy for spawning model
+        rospy.wait_for_service("/gazebo/spawn_sdf_model")
+        spawn = rospy.ServiceProxy("/gazebo/spawn_sdf_model", SpawnModel)
+
+        # format collision block from input boolean
+        collision_block = (COLLISION_BLOCK if collide else NO_COLLISION_BLOCK).format(radius=radius_m)
+        
+        # format SDF with input parameters
+        sdf = SDF_TPL.format(name=name,
+                            static=str(static).lower(),
+                            collision_block=collision_block,
+                            radius=radius_m)
+
+        # define initial pose
+        p = Pose()
+        p.position.x, p.position.y, p.position.z = float(x), float(y), float(z)
+        qx, qy, qz, qw = T.quaternion_from_euler(roll, pitch, yaw)
+        p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = qx, qy, qz, qw
+
+        return spawn(model_name=name, model_xml=sdf, robot_namespace="",
+                    initial_pose=p, reference_frame=reference_frame)
+
+    def delete_model(self, name):
+        """Delete a model from the simulation.
+
+        Args:
+            name (str): Name of the model to delete.
+
+        Returns:
+            DeleteModelResponse: Response from the delete service.
+        """
+        
+        # Define SDF template for the sphere
+        rospy.wait_for_service("/gazebo/delete_model")
+        
+        # create service proxy
+        delete = rospy.ServiceProxy("/gazebo/delete_model", DeleteModel)
+        return delete(name)
+
+    def initialize_waypoint_markers(self):
+        '''
+        Initialize waypoint markers from DFA in Gazebo simulation environment
+        '''
+        # get number of wapoints to determine color scaling
+        num_waypoints = len(self.DFA_alphabet_dict)
+        
+        color_delta = 1.0 / max(1, num_waypoints - 1)
+        
+        # iterate through DFA alphabet dictionary to spawn markers
+        for letter, grid_state in self.DFA_alphabet_dict.items():
+            # get corresponding pose for grid state
+            pose = self.grid_world.grid_state2rect_pose_r(grid_state)
+            
+            x = pose.position.x
+            y = pose.position.y
+            z = pose.position.z
+            
+            # determine color based on letter index
+
+            # get ordered list of letters (each letter is a "key" in the DFA alphabet dict)
+            ordered_letter_list = list(self.DFA_alphabet_dict.keys())
+            
+            # scale color based on letter index, brightness increases linearly with index
+            letter_index = ordered_letter_list.index(letter)
+            color_value = letter_index * color_delta
+
+            # create RGB color tuple
+            color_rgb = (color_value, color_value, color_value)  # grayscale color
+
+            self.waypoint_names.append(f"waypoint_{letter}")
+            
+            # spawn sphere at this location
+            self.spawn_sphere(name=f"waypoint_{letter}", 
+                              radius_m=0.03, 
+                              x=x, y=y, z=z, 
+                              static=True, 
+                              collide=False, 
+                              reference_frame="world", 
+                              color_rgb=color_rgb)
+           
+            print(f"Spawned waypoint marker for letter {letter} at grid state {grid_state}")
+
+    def delete_all_markers(self):
+        '''
+        Delete all waypoint markers from Gazebo simulation environment
+        '''
+        
+        # iterate through DFA alphabet dictionary to delete markers
+        for name in self.waypoint_names:
+            self.delete_model(name)
+            print(f"Deleted waypoint marker {name} from simulation")    
+    
+        self.waypoint_names.clear()
+    
     def close(self):
         # shutdown moveit commander
         self.UR5e_move_group.clear_pose_targets()
         self.UR5e_move_group.clear_path_constraints()
+        self.delete_all_markers()
+        
         moveit_commander.roscpp_shutdown()        
         
 class UR5e_TQ_agent:
@@ -1134,7 +1460,7 @@ class UR5e_TQ_agent:
         )
 
         self.q_values = defaultdict(lambda: np.zeros(self.env.action_space.n))
-
+    
     def discrete_obs(self, obs) -> np.array:
         '''
         Discretize continuous observation into discrete state
@@ -1155,8 +1481,13 @@ class UR5e_TQ_agent:
         joint_angle_disc_array = self.true_joint_angles2discrete_joint_angles(joint_angle_array)
 
         # concatenate all discrete components into single observation
-        discrete_obs = np.concatenate((grid_state_array, joint_angle_disc_array, dfa_state_array))
-        
+        # add initial state to observation for fetch and return task
+        if self.env.fetch_return_bool:
+            start_grid_state_array = np.array(self.env.grid_world.start_state, dtype=np.int32)
+            discrete_obs = np.concatenate(( grid_state_array, joint_angle_disc_array, dfa_state_array, start_grid_state_array))
+        else:
+            discrete_obs = np.concatenate((grid_state_array, joint_angle_disc_array, dfa_state_array))
+
         return discrete_obs
 
     def true_joint_angles2discrete_joint_angles(self, joint_angle_array) -> np.array:
@@ -1180,7 +1511,7 @@ class UR5e_TQ_agent:
         Get action using epsilon-greedy policy
         
         Args:
-            obs (np.array): current observation
+            obs (np.array): current observation from UR5e gym env
         
         Returns:
             action (int): action to take
@@ -1211,7 +1542,7 @@ class UR5e_TQ_agent:
         Update Q-table using with temporal difference learning
         Also updatestraining error and num steps
         Args:
-            obs (np.array): current observation
+            obs (np.array): current observation from UR5e gym env
             action (int): action taken
             reward (float): reward received
             done (bool): whether episode ended
@@ -1252,13 +1583,97 @@ class UR5e_TQ_agent:
         
         # update step counter
         self.step_counter += 1
+        
+        return temporal_difference
 
     def decay_epsilon(self):
         '''
         Decay the exploration rate (epsilon) over time.
         '''
-        delta = self.step_counter / (self.exploration_fraction * self.max_steps)
-        self.epsilon = self.initial_epsilon - delta * (self.initial_epsilon - self.final_epsilon)
+        delta = np.amin( ( self.step_counter / (self.exploration_fraction * self.max_steps), 1 ) )
+        delta_epsilon = delta * (self.initial_epsilon - self.final_epsilon)
+        self.epsilon = self.initial_epsilon - delta_epsilon
+
+    def save_model_data(self, path: str, 
+                     time_elapsed: Optional[float], 
+                     episode_returns: Optional[List[float]] = None, 
+                     episode_lengths: Optional[List[int]] = None):
+        '''
+        Save the RL model data to a file with provided path.
+        Args:
+            path (str): file path to save the Q-table
+            time_elapsed (float): total time elapsed during training
+            episode_returns (list): list of episode returns during training
+            episode_lengths (list): list of episode lengths during training
+        '''
+        
+        # get learning agent pararmeters
+        
+        TQL_agent_params = {
+            "learning_rate": self.learning_rate,
+            "initial_epsilon": self.initial_epsilon,
+            "final_epsilon": self.final_epsilon,
+            "exploration_fraction": self.exploration_fraction,
+            "discount_factor": self.discount_factor,
+            "angle_size": self.angle_size,
+            "max_steps": self.max_steps
+        }
+        
+        # get environment info
+        env_info = self.env.get_env_info()
+        
+        # assemble payload
+        payload = {
+            "n_actions": int(self.env.num_actions),
+            "q": {k: v.astype(np.float32) for k, v in self.q_values.items()},
+            "time_elapsed": time_elapsed,
+            "episode_returns": episode_returns,
+            'episode_lengths': episode_lengths,
+            "env_info": env_info, 
+            "TQL_agent_params": TQL_agent_params
+        }
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+def env_info2UR5e_grid_env(env_info: dict) -> UR5eGridEnvwDFA:
+    """
+    Create UR5eGridEnvwDFA from env_info dict by unpacking only valid ctor args.
+    The env_info dict should include the required keys (e.g. 'start_states','goal_state',...).
+    """
+    # collect valid constructor parameter names (exclude 'self')
+    sig = inspect.signature(UR5eGridEnvwDFA.__init__)
+    valid_params = [p for p in sig.parameters if p != "self"]
+
+    # keep only keys present in the constructor signature
+    filtered = {k: v for k, v in env_info.items() if k in valid_params}
+
+    # optional: provide defaults or raise if required params missing
+    missing = [p for p in valid_params if p not in filtered and sig.parameters[p].default is inspect._empty]
+    if missing:
+        raise TypeError(f"Missing required env_info keys: {missing}")
+
+    # construct environment using keyword expansion
+    return UR5eGridEnvwDFA(**filtered)
+
+def TQL_params2TQL_agent(env: UR5eGridEnvwDFA, TQL_agent_params: dict) -> UR5e_TQ_agent:
+    """
+    Create UR5e_TQ_agent from TQL_agent_params dict by unpacking only valid ctor args.
+    The TQL_agent_params dict should include the required keys (e.g. 'learning_rate','initial_epsilon',...).
+    """
+    # collect valid constructor parameter names (exclude 'self' and 'UR5e_env')
+    sig = inspect.signature(UR5e_TQ_agent.__init__)
+    valid_params = [p for p in sig.parameters if p not in ("self", "UR5e_env")]
+
+    # keep only keys present in the constructor signature
+    filtered = {k: v for k, v in TQL_agent_params.items() if k in valid_params}
+
+    # optional: provide defaults or raise if required params missing
+    missing = [p for p in valid_params if p not in filtered and sig.parameters[p].default is inspect._empty]
+    if missing:
+        raise TypeError(f"Missing required TQL_agent_params keys: {missing}")
+
+    # construct agent using keyword expansion
+    return UR5e_TQ_agent(UR5e_env=env, **filtered)
 
 if __name__ == "__main__":
     # simple test of environment

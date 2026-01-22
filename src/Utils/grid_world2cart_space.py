@@ -16,6 +16,7 @@ from moveit_commander.robot import RobotCommander
 from moveit_commander.move_group import RobotTrajectory
 from geometry_msgs.msg import PoseStamped 
 from typing import Optional
+import matplotlib.pyplot as plt
 
 class grid_world:
     '''
@@ -256,6 +257,9 @@ class grid_world:
         
         trajectory_list: - list of dicts:  {'t': float_seconds, 'x': ..., 'y': ..., 'z': ..., 'r': ..., 'theta': ... ,} for each waypoint
         grid_trajectory_list: - list of grid states corresponding to each waypoint
+        joint_trajectory_list: [{'t', 'q': [q1,...,q6]}, ...]  - joint angles in same order as 
+                            joint_names
+        joint_names: [str, ...] - names for q indices corresponding to the name of each joint angle
         """
 
         # Extract the JointTrajectory from the RobotTrajectory
@@ -292,6 +296,9 @@ class grid_world:
         
         # grid trajectory list
         grid_trajectory_list = []
+        
+        # will house trajectory of UR5e joint angles
+        joint_trajectory_list = []
         
         # Iterate over each JointTrajectoryPoint in the plan
         for pt in jt.points:
@@ -351,9 +358,116 @@ class grid_world:
             
             grid_trajectory_list.append( grid_state )
             
+            # save joint angles
+            joint_trajectory_list.append({
+                't': pt.time_from_start.to_sec(),
+                'q': list(pt.positions)  # radians
+            })
+                
         # Return the time-stamped XYZ series
-        return trajectory_list, grid_trajectory_list
-    
+        return trajectory_list, grid_trajectory_list, joint_trajectory_list, joint_names
+
+    def plot_plan_trajectories(self,
+                            plan: RobotTrajectory,
+                            fk_link: str = "tool0",
+                            robot: Optional[RobotCommander] = None,
+                            save_basename: Optional[str] = None) -> None:
+        """
+        Plot x/y/z pose vs time AND grid (gx/gy/gz) vs time for a MoveIt plan.
+
+        Args:
+            plan: RobotTrajectory returned by MoveIt.
+            fk_link: end-effector link for FK sampling (default: "tool0").
+            robot: optional RobotCommander to reuse (faster if provided).
+            save_basename: if provided, saves two PNGs:
+                f"{save_basename}_pose_xyz.png" and f"{save_basename}_grid_gxgygz.png"
+                Otherwise, just shows the figures.
+        """
+
+        # ---- Extract trajectories using your helper ----
+        traj_list, grid_list, joint_traj, joint_names = self.plan2tool_traj(plan, fk_link=fk_link, robot=robot)
+
+        if len(traj_list) == 0 or len(grid_list) == 0:
+            print("No waypoints to plot (FK failed or empty plan).")
+            return
+
+        # ---- Convert to arrays ----
+        t = np.array([d["t"] for d in traj_list], dtype=float)
+        x = np.array([d["x"] for d in traj_list], dtype=float)
+        y = np.array([d["y"] for d in traj_list], dtype=float)
+        z = np.array([d["z"] for d in traj_list], dtype=float)
+        Q = np.array([d['q'] for d in joint_traj], float)   # shape [N, n_joints]
+        
+        # shape [N, 3] assumed (gx, gy, gz)
+        grid_arr = np.asarray(grid_list, dtype=float)  
+        if grid_arr.ndim != 2 or grid_arr.shape[1] != 3:
+            raise ValueError(f"Expected grid states of shape [N,3], got {grid_arr.shape}")
+
+        gx, gy, gz = grid_arr[:, 0], grid_arr[:, 1], grid_arr[:, 2]
+
+        LINE_STYLES = [
+            ("solid",   "o"),   # ───── with circles
+            ("dashed",  "s"),   # ─ ─ ─ with squares
+            ("dashdot", "^"),   # ─·─·─ with triangles
+            ("dotted",  "x"),   # ····· with x markers
+            ("solid",   "D"),   # solid with diamonds
+            ("dashed",  "v"),   # dashed with down triangles
+        ]
+
+        def style(i):
+            ls, mk = LINE_STYLES[i % len(LINE_STYLES)]
+            return dict(linestyle=ls, marker=mk, linewidth=2.0, markersize=5)
+        
+        # ---- Figure 1: Pose XYZ vs time ----
+        fig1 = plt.figure(figsize=(8, 5))
+        ax1 = fig1.add_subplot(111)
+        ax1.plot(t, x, linestyle =  'solid', label="x (m)")
+        ax1.plot(t, y, linestyle = ':', label="y (m)")
+        ax1.plot(t, z, linestyle = '--', label="z (m)")
+        ax1.set_xlabel("time (s)")
+        ax1.set_ylabel("position (m)")
+        ax1.set_title("End-effector pose vs time")
+        ax1.grid(True, linestyle="--", alpha=0.4)
+        ax1.legend(loc="best")
+        fig1.tight_layout()
+
+        # ---- Figure 2: Grid indices vs time (step plots) ----
+        fig2 = plt.figure(figsize=(8, 5))
+        ax2 = fig2.add_subplot(111)
+        ax2.step(t, gx, where="post", linestyle = 'solid', label="gx")
+        ax2.step(t, gy, where="post", linestyle = 'dashed', label="gy")
+        ax2.step(t, gz, where="post", linestyle = 'dashdot', label="gz")
+        ax2.set_xlabel("time (s)")
+        ax2.set_ylabel("grid index")
+        ax2.set_title("Grid state vs time")
+        ax2.grid(True, linestyle="--", alpha=0.4)
+        ax2.legend(loc="best")
+        fig2.tight_layout()
+
+        # ---- Figure 3 Joint Angles vs time
+        fig3 = plt.figure(figsize=(8,5))
+        for j,name in enumerate(joint_names):
+            plt.plot(t, Q[:, j], label=name)
+        plt.xlabel("time (s)")
+        plt.ylabel("joint angle (rad)")
+        plt.title("Joint angles vs time")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend(loc="best")
+        fig3.tight_layout()
+
+
+        # ---- Save or show ----
+        if save_basename:
+            p1 = f"{save_basename}_pose_xyz.png"
+            p2 = f"{save_basename}_grid_gxgygz.png"
+            fig1.savefig(p1, dpi=150)
+            fig2.savefig(p2, dpi=150)
+            print(f"Saved: {p1}\nSaved: {p2}")
+            plt.close(fig1)
+            plt.close(fig2)
+        else:
+            plt.show()
+
     def grid_state2rect_pose_g(self, grid_state: Union[Sequence[int], np.ndarray]) -> Pose:
         '''
         Maps a grid state in the rectangular grid world to a pose in the grid world frame

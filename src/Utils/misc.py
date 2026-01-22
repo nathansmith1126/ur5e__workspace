@@ -13,20 +13,47 @@ from shape_msgs.msg import SolidPrimitive
 from typing import Optional, Union, Sequence
 from moveit_commander import MoveGroupCommander, RobotCommander, PlanningScene
 
+def add_gripper2scene(scene: PlanningScene, 
+                      move_group: MoveGroupCommander, 
+                      name="gripper_box"):
+    # Use whatever MoveIt thinks is the current end-effector link
+    ee_link = move_group.get_end_effector_link()  # likely "tool0"
+
+    # Pose of the box in the EE frame
+    box_pose = PoseStamped()
+    box_pose.header.frame_id = ee_link
+    box_pose.pose.orientation.w = 1.0
+
+    # Shift the box forward along the tool's X axis (adjust as needed)
+    box_pose.pose.position.x = 0.0   # meters forward from flange
+    box_pose.pose.position.y = 0.0
+    box_pose.pose.position.z = 0.06
+
+    # Size of the box [x, y, z] in meters (roughly your gripper volume)
+    box_size = (0.08, 0.08, 0.06)
+
+    # Attach the box to the robot so it moves with the tool
+    scene.attach_box(
+        link=ee_link,
+        name=name,
+        pose=box_pose,
+        size=box_size
+    )
+
+    # Give MoveIt a moment to apply the update
+    rospy.sleep(1.0)
+    return scene
+
 def add_table2scene( robot: RobotCommander,
                           scene: PlanningScene,
                           table_center: Optional[Union[Sequence[float], np.ndarray]] = None,
                             table_dims: Optional[tuple] = None) -> PlanningScene:
     '''
-<<<<<<< HEAD
     Function to initialize the planning scene with a table
     Returns:
     robot: RobotCommander - represents robot arm state
     UR5e_move_group: MoveGroupCommander - represents robot arm planner
     scene: PlanningSceneInterface - object housing items in environment
-=======
-    Function to initialize the planning scene with a tabl
->>>>>>> parent of 1b63faf... modifiedgrid world class
     '''
     #-------------------------
     # Add a table to the scene
