@@ -141,12 +141,12 @@ class RS2UR5e_interface:
         # ensure euler angles and rotation matrix are computed
         if self.pitch is None or self.yaw is None:
             self.grav_vector2euler_angles()
-        if not hasattr(self, 'T_0C'):
+        if not hasattr(self, 'T_C0'):
             self.euler_angles2rot_matrix()
 
         # vector mapping the origin of the robot base frame (Or)
         # to the origin of the camera frame (Oc) expressed in the robot base frame
-        self.OrOc_RF = self.T_RC @ self.OrOc_CF
+        self.OrOc_RF = self.T_CR @ self.OrOc_CF
 
         # OcP expressed in robot frame
         OcP_RF = self.T_CR @ OcP_CF
@@ -158,17 +158,26 @@ class RS2UR5e_interface:
     
 
 if __name__ == "__main__":
-        OcOr_CF = np.array([
-                            [0.2],
-                            [0.0], 
-                            [0.3]
-                            ])
-        rs_accel_grav_vector = np.array([
-                                        [-0.05], 
-                                        [-7.12], 
-                                        [-6.74]
-                                        ])
-        interface = RS2UR5e_interface(OcOr_CF, rs_accel_grav_vector)
+    OcOr_CF = np.array([
+                        [0.2],
+                        [0.0], 
+                        [0.3]
+                        ])
+    rs_accel_grav_vector = np.array([
+                                    [-0.05], 
+                                    [-7.12], 
+                                    [-6.74]
+                                    ])
+    
+    OcP_CF = np.array([
+                    [0.1],
+                    [0.1],
+                    [0.1]
+                    ])
+    interface = RS2UR5e_interface(OcOr_CF, rs_accel_grav_vector)
+    OrP_RF = interface.transform_point_CF2RF(OcP_CF)
+    
+    
 
         
 

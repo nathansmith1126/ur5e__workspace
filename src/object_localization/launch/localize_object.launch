@@ -1,0 +1,33 @@
+<launch>
+    <!-- launch rs camera drivers -->
+    <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+        <arg name="align_depth" value="true"/>
+        <arg name="filters" value="decimation"/>
+    </include>
+
+    <!-- launch apriltag drivers -->
+    <include file="$(find apriltag_ros)/launch/continuous_detection.launch"/>
+
+    <!-- set up transform from robot base to apriltag -->
+    <node pkg="tf" type="static_transform_publisher" name="base_link_to_tag_tf" args="-0.219 0.165 0.0 1.5708 0.0 0.0 tag_1 base_link 100" />
+
+    <!-- Debayer and undistort the rgb image -->
+    <node ns="camera/color" pkg="image_proc" type="image_proc" name="ip_node1"/>
+
+    <!-- run depth_image_proc pipelines -->
+    <node pkg="nodelet" type="nodelet" args="manager" name="nodelet_manager" output="screen"/>
+
+    <node pkg="nodelet" type="nodelet" name="cloudify" args="load depth_image_proc/point_cloud_xyz nodelet_manager">
+        <remap from="points" to="/camera/depth/points"/>
+        <remap from="image_rect" to="/camera/aligned_depth_to_color/image_raw"/>
+        <remap from="rgb/camera_info" to="/camera/aligned_depth_to_color/camera_info"/>
+    </node>
+
+    <!-- Run object localization server -->
+    <node name="localize_object_server" pkg="object_localization" type="process_pointcloud.py" output="screen">
+        <param name="pointcloud_topic" value="camera/depth/points"/>
+        <param name="pcl_frame" value="camera_color_optical_frame"/>
+        <param name="robot_frame" value="base_link"/>
+    </node>
+
+</launch>
