@@ -148,17 +148,23 @@ print(f"Initial Observation: {obs}")
 #                 ]
 
 # bool to indicate whether to use dependable trajectory
-dependable_bool = False
+dependable_bool = True
+# dependable_bool = False
 
 # plot indicator
 plot_bool = False    
 
 if dependable_bool:
     sleep_time = 0.05
+    # trajectory_follow = [ q_1, 
+    #                  [-1, -1, 4], 
+    #                  q_4,
+    #                  [1, 1, 4], 
+    #                  q_14                ]
     trajectory_follow = [ q_1, 
-                     [-1, -1, 4], 
+                     [-2, -2, 4], 
                      q_4,
-                     [1, 1, 4], 
+                     [2, 2, 4], 
                      q_14
                 ]
 else:

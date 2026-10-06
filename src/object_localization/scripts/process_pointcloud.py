@@ -218,6 +218,12 @@ from object_localization.srv import Centroid, CentroidResponse
 from geometry_msgs.msg import PointStamped
 import tf
 
+"""
+TO-DO:
+- Detect from multiple tags so pipeline doesn't fail when the right tag is blocked
+- Object segmentation so we can detect multiple objects
+"""
+
 class GetCentroidServer:
     def __init__(self):
         rospy.init_node('localize_server')
@@ -232,6 +238,12 @@ class GetCentroidServer:
         self.tf_listener = tf.TransformListener()
 
         self.lock = threading.Lock()
+        # Wait for the topic to be published before proceeding
+        first_msg = rospy.wait_for_message(self.topic_name, PointCloud2)
+        # buffer the first received message
+        with self.lock:
+            self.received_ros_cloud = first_msg
+
         # Create a persistent subscriber so we continuously buffer the latest pointcloud
         self.subscriber = rospy.Subscriber(self.topic_name, PointCloud2, self.callback)
         self.service = rospy.Service('~get_location', Centroid, self.handle_request)
